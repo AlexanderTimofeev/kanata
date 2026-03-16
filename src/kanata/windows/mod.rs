@@ -4,11 +4,20 @@ use parking_lot::Mutex;
 
 use crate::kanata::*;
 
-#[cfg(all(feature = "simulated_input", not(feature = "interception_driver")))]
+#[cfg(all(
+    feature = "simulated_input",
+    not(any(feature = "interception_driver", feature = "kmdf_driver"))
+))]
 mod exthook;
-#[cfg(all(not(feature = "simulated_input"), feature = "interception_driver"))]
+#[cfg(all(
+    not(feature = "simulated_input"),
+    any(feature = "interception_driver", feature = "kmdf_driver")
+))]
 mod interception;
-#[cfg(all(not(feature = "simulated_input"), not(feature = "interception_driver")))]
+#[cfg(all(
+    not(feature = "simulated_input"),
+    not(any(feature = "interception_driver", feature = "kmdf_driver"))
+))]
 mod llhook;
 
 pub static ALTGR_BEHAVIOUR: Lazy<Mutex<AltGrBehaviour>> =
@@ -20,7 +29,7 @@ pub fn set_win_altgr_behaviour(b: AltGrBehaviour) {
 
 impl Kanata {
     #[cfg(all(
-        not(feature = "interception_driver"),
+        not(any(feature = "interception_driver", feature = "kmdf_driver")),
         not(feature = "simulated_output"),
         not(feature = "win_sendinput_send_scancodes"),
     ))]
@@ -126,7 +135,7 @@ impl Kanata {
     }
 
     #[cfg(any(
-        feature = "interception_driver",
+        any(feature = "interception_driver", feature = "kmdf_driver"),
         feature = "simulated_output",
         feature = "win_sendinput_send_scancodes"
     ))]
@@ -181,7 +190,10 @@ impl Kanata {
 /// the states that might be stuck. A real use case might be to have
 /// a fake key pressed for a long period of time, so make sure those
 /// are not cleared.
-#[cfg(all(not(feature = "interception_driver"), target_os = "windows"))]
+#[cfg(all(
+    not(any(feature = "interception_driver", feature = "kmdf_driver")),
+    target_os = "windows"
+))]
 pub fn clear_states_from_inactivity(
     k: &mut parking_lot::MutexGuard<Kanata>,
     now: web_time::Instant,

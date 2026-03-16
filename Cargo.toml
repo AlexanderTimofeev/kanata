@@ -97,6 +97,7 @@ windows-sys = { version = "0.52.0", features = [
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_Controls",
@@ -133,6 +134,10 @@ win_manifest = ["dep:embed-resource", "dep:indoc", "dep:regex"]
 cargo-clippy = []
 cmd = ["kanata-parser/cmd"]
 interception_driver = ["dep:kanata-interception", "kanata-parser/interception_driver"]
+kmdf_driver = ["dep:kanata-interception", "dep:windows-sys", "kanata-parser/interception_driver"]
+# kmdf_driver: use kanata-kbdflt.sys KMDF filter instead of Interception.
+# Requires the driver to be installed first; see driver2/driver/kanata_kbdflt.inf.
+# interception_driver's scancode tables are reused for OsCode ↔ scancode mapping.
 simulated_output = ["dep:indoc"]
 simulated_input = ["dep:indoc"]
 passthru_ahk = ["simulated_input","simulated_output"]
@@ -144,6 +149,7 @@ gui = ["win_manifest","kanata-parser/gui",
   "native-windows-gui/tray-notification","native-windows-gui/message-window","native-windows-gui/menu","native-windows-gui/cursor","native-windows-gui/high-dpi","native-windows-gui/embed-resource","native-windows-gui/image-decoder","native-windows-gui/notice","native-windows-gui/animation-timer",
 ]
 zippychord = ["kanata-parser/zippychord"]
+gui_kmdf_cmd = ["win_manifest", "gui", "cmd", "kmdf_driver", "win_llhook_read_scancodes"]
 
 [profile.release]
 opt-level = "z"
