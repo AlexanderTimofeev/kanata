@@ -10,6 +10,7 @@
 //!
 //! Selected by `--features kmdf_driver`.
 
+use std::collections::VecDeque;
 use std::io;
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -18,8 +19,13 @@ use std::time::Duration;
 
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+    SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
+    SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -180,24 +186,133 @@ static DEVICE_PATH: &[u16] = &[
     0u16,
 ];
 
-fn try_open_driver() -> anyhow::Result<OwnedHandle> {
+const GUID_DEVINTERFACE_KBFILTER: windows_sys::core::GUID = windows_sys::core::GUID {
+    data1: 0x3fb7299d,
+    data2: 0x6847,
+    data3: 0x4490,
+    data4: [0xb0, 0xc9, 0x99, 0xe0, 0x98, 0x6a, 0xb8, 0x86],
+};
+
+fn open_driver_path(path: *const u16) -> anyhow::Result<OwnedHandle> {
     let handle = unsafe {
         CreateFileW(
-            DEVICE_PATH.as_ptr(),
+            path,
             GENERIC_READ | GENERIC_WRITE,
             0,
             ptr::null(),
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+            FILE_ATTRIBUTE_NORMAL,
             0,
         )
     };
     if handle == INVALID_HANDLE_VALUE {
-        let err = io::Error::last_os_error();
-        anyhow::bail!("CreateFileW(KanataKeyboard) failed: {err}");
+        anyhow::bail!("{}", io::Error::last_os_error());
     }
+
     // SAFETY: handle is valid and we now own it.
     Ok(unsafe { OwnedHandle::from_raw_handle(handle as _) })
+}
+
+fn try_open_driver_interface() -> anyhow::Result<OwnedHandle> {
+    let dev_info = unsafe {
+        SetupDiGetClassDevsW(
+            &GUID_DEVINTERFACE_KBFILTER,
+            ptr::null(),
+            0,
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        )
+    };
+    if dev_info == INVALID_HANDLE_VALUE {
+        anyhow::bail!(
+            "SetupDiGetClassDevsW(GUID_DEVINTERFACE_KBFILTER) failed: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    let mut index = 0;
+    let result = loop {
+        let mut iface = SP_DEVICE_INTERFACE_DATA {
+            cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+            ..unsafe { std::mem::zeroed() }
+        };
+
+        let ok = unsafe {
+            SetupDiEnumDeviceInterfaces(
+                dev_info,
+                ptr::null_mut(),
+                &GUID_DEVINTERFACE_KBFILTER,
+                index,
+                &mut iface,
+            )
+        };
+        if ok == 0 {
+            break Err(anyhow::anyhow!(
+                "no present kanata-kbdflt device interface found: {}",
+                io::Error::last_os_error()
+            ));
+        }
+
+        let mut required = 0u32;
+        unsafe {
+            SetupDiGetDeviceInterfaceDetailW(
+                dev_info,
+                &mut iface,
+                ptr::null_mut(),
+                0,
+                &mut required,
+                ptr::null_mut(),
+            );
+        }
+        if required == 0 {
+            index += 1;
+            continue;
+        }
+
+        let words = (required as usize).div_ceil(size_of::<usize>());
+        let mut detail_buf = vec![0usize; words];
+        let detail = detail_buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
+        unsafe {
+            (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+        }
+
+        let ok = unsafe {
+            SetupDiGetDeviceInterfaceDetailW(
+                dev_info,
+                &mut iface,
+                detail,
+                required,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if ok != 0 {
+            let open_result = unsafe { open_driver_path((*detail).DevicePath.as_ptr()) };
+            if open_result.is_ok() {
+                break open_result;
+            }
+        }
+
+        index += 1;
+    };
+
+    unsafe {
+        SetupDiDestroyDeviceInfoList(dev_info);
+    }
+
+    result
+}
+
+fn try_open_driver() -> anyhow::Result<OwnedHandle> {
+    match open_driver_path(DEVICE_PATH.as_ptr()) {
+        Ok(handle) => Ok(handle),
+        Err(named_err) => {
+            try_open_driver_interface().map_err(|iface_err| {
+                anyhow::anyhow!(
+                    "CreateFileW(\\\\.\\KanataKeyboard) failed: {named_err}; interface open failed: {iface_err}"
+                )
+            })
+        }
+    }
 }
 
 fn open_driver_with_retry() -> anyhow::Result<OwnedHandle> {
@@ -299,6 +414,7 @@ impl KmdfHandle {
 
 pub struct KbdIn {
     drv: KmdfHandle,
+    pending: VecDeque<InputEvent>,
 }
 
 impl KbdIn {
@@ -306,18 +422,28 @@ impl KbdIn {
         log::info!("kanata-kbdflt: opening \\.\\ KanataKeyboard for input");
         Ok(Self {
             drv: KmdfHandle::open()?,
+            pending: VecDeque::new(),
         })
     }
 
     /// Blocking read; returns one event at a time, reconnecting on error.
     pub fn read(&mut self) -> anyhow::Result<InputEvent> {
         loop {
+            if let Some(event) = self.pending.pop_front() {
+                return Ok(event);
+            }
+
             match self.drv.read_events() {
-                Ok(evts) if !evts.is_empty() => return Ok(evts[0]),
+                Ok(mut evts) if !evts.is_empty() => {
+                    let first = evts.remove(0);
+                    self.pending.extend(evts);
+                    return Ok(first);
+                }
                 Ok(_) => {} // empty — retry immediately
                 Err(e) => {
                     log::warn!("kanata-kbdflt: read error ({e}), reconnecting…");
                     self.drv = KmdfHandle::open()?;
+                    self.pending.clear();
                 }
             }
         }
@@ -343,9 +469,17 @@ impl KbdOut {
     }
 
     pub fn write(&mut self, event: InputEvent) -> Result<(), io::Error> {
-        self.drv
-            .inject_events(&[event])
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        match self.drv.inject_events(&[event]) {
+            Ok(()) => Ok(()),
+            Err(first_err) => {
+                log::warn!("kanata-kbdflt: inject error ({first_err}), reconnecting…");
+                self.drv = KmdfHandle::open()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                self.drv
+                    .inject_events(&[event])
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            }
+        }
     }
 
     pub fn write_key(&mut self, key: OsCode, value: KeyValue) -> Result<(), io::Error> {

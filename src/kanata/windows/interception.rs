@@ -1,14 +1,96 @@
 use anyhow::{Result, anyhow};
-use kanata_interception as ic;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::mpsc::SyncSender as Sender;
 
 use super::PRESSED_KEYS;
 use crate::kanata::*;
-use crate::oskbd::KeyValue;
+use crate::oskbd::{KbdIn, KeyValue};
+
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
+use kanata_interception as ic;
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 use kanata_parser::keys::OsCode;
 
+#[cfg(feature = "kmdf_driver")]
+impl Kanata {
+    pub fn event_loop_inner(kanata: Arc<Mutex<Self>>, tx: Sender<KeyEvent>) -> Result<()> {
+        let (allow_hardware_repeat, mouse_movement_key) = {
+            let k = kanata.lock();
+            (k.allow_hardware_repeat, k.mouse_movement_key.clone())
+        };
+
+        if mouse_movement_key.lock().is_some() {
+            log::warn!("kmdf_driver does not provide mouse input interception");
+        }
+
+        let mut kbd_in = KbdIn::new()
+            .map_err(|e| anyhow!("failed to open kanata-kbdflt input device: {e}"))?;
+
+        loop {
+            let in_event = kbd_in.read().map_err(|e| anyhow!("failed read: {e}"))?;
+            let mut key_event = match KeyEvent::try_from(in_event) {
+                Ok(event) => event,
+                Err(_) => {
+                    log::debug!("kmdf: could not map input event {in_event:?}");
+                    continue;
+                }
+            };
+
+            check_for_exit(&key_event);
+
+            match key_event.value {
+                KeyValue::Release => {
+                    PRESSED_KEYS.lock().remove(&key_event.code);
+                }
+                KeyValue::Press => {
+                    let mut pressed_keys = PRESSED_KEYS.lock();
+                    if pressed_keys.contains(&key_event.code) {
+                        key_event.value = KeyValue::Repeat;
+                    } else {
+                        pressed_keys.insert(key_event.code);
+                    }
+                }
+                _ => {}
+            }
+
+            if key_event.value == KeyValue::Repeat && !allow_hardware_repeat {
+                continue;
+            }
+
+            if !MAPPED_KEYS.lock().contains(&key_event.code) {
+                let mut kanata = kanata.lock();
+                kanata
+                    .kbd_out
+                    .write(in_event)
+                    .map_err(|e| anyhow!("failed write: {e}"))?;
+                continue;
+            }
+
+            tx.try_send(key_event)?;
+        }
+    }
+
+    pub fn event_loop(
+        kanata: Arc<Mutex<Self>>,
+        tx: Sender<KeyEvent>,
+        #[cfg(feature = "gui")] ui: crate::gui::system_tray_ui::SystemTrayUi,
+    ) -> Result<()> {
+        #[cfg(not(feature = "gui"))]
+        {
+            Self::event_loop_inner(kanata, tx)
+        }
+        #[cfg(feature = "gui")]
+        {
+            std::thread::spawn(move || -> Result<()> { Self::event_loop_inner(kanata, tx) });
+            let _ui = ui;
+            native_windows_gui::dispatch_thread_events();
+            Ok(())
+        }
+    }
+}
+
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 impl Kanata {
     pub fn event_loop_inner(kanata: Arc<Mutex<Self>>, tx: Sender<KeyEvent>) -> Result<()> {
         let intrcptn = ic::Interception::new().ok_or_else(|| anyhow!("interception driver should init: have you completed the interception driver installation?"))?;
@@ -130,6 +212,7 @@ impl Kanata {
             }
         }
     }
+
     pub fn event_loop(
         kanata: Arc<Mutex<Self>>,
         tx: Sender<KeyEvent>,
@@ -149,6 +232,7 @@ impl Kanata {
     }
 }
 
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 fn is_device_interceptable(
     input_dev: ic::Device,
     intrcptn: &ic::Interception,
@@ -189,6 +273,8 @@ fn is_device_interceptable(
         _ => unreachable!("excluded and allowed should be mutually exclusive"),
     }
 }
+
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 fn mouse_state_to_event(state: ic::MouseState, rolling: i16) -> Option<KeyEvent> {
     if state.contains(ic::MouseState::RIGHT_BUTTON_DOWN) {
         Some(KeyEvent {
