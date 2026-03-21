@@ -150,6 +150,7 @@ gui = ["win_manifest","kanata-parser/gui",
 ]
 zippychord = ["kanata-parser/zippychord"]
 gui_kmdf_cmd = ["win_manifest", "gui", "cmd", "kmdf_driver", "win_llhook_read_scancodes"]
+gui_intercept_cmd = ["win_manifest", "gui", "cmd", "interception_driver", "win_llhook_read_scancodes"]
 
 [profile.release]
 opt-level = "z"

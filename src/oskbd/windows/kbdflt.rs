@@ -16,8 +16,6 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
 use std::time::Duration;
 
-use winapi::um::winuser::SendInput;
-
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Storage::FileSystem::{
@@ -27,6 +25,8 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 
 use crate::kanata::CalculatedMouseMove;
 use crate::oskbd::KeyValue;
+use crate::oskbd::osc_to_u16;
+use crate::oskbd::u16_to_osc;
 use kanata_parser::custom_action::*;
 use kanata_parser::keys::*;
 
