@@ -5,7 +5,9 @@ use std::sync::mpsc::SyncSender as Sender;
 
 use super::PRESSED_KEYS;
 use crate::kanata::*;
-use crate::oskbd::{KbdIn, KeyValue};
+use crate::oskbd::KeyValue;
+#[cfg(feature = "kmdf_driver")]
+use crate::oskbd::KbdIn;
 
 #[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 use kanata_interception as ic;
