@@ -463,7 +463,11 @@ impl KmdfHandle {
             )
         };
         if ok == 0 {
-            anyhow::bail!("READ_EVENTS: {}", io::Error::last_os_error());
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(170) {
+                anyhow::bail!("READ_EVENTS_BUSY: {err}");
+            }
+            anyhow::bail!("READ_EVENTS: {err}");
         }
 
         let count = returned as usize / size_of::<KanataWireEvent>();
@@ -509,6 +513,10 @@ impl KmdfHandle {
     }
 }
 
+fn is_read_events_busy(err: &anyhow::Error) -> bool {
+    err.to_string().contains("READ_EVENTS_BUSY")
+}
+
 // ---------------------------------------------------------------------------
 // KbdIn — used by Kanata's read loop
 // ---------------------------------------------------------------------------
@@ -549,6 +557,13 @@ impl KbdIn {
                             }
                         }
                         Err(e) => {
+                            if is_read_events_busy(&e) {
+                                log::warn!(
+                                    "kanata-kbdflt: read busy on {label}; disabling this input reader"
+                                );
+                                return;
+                            }
+
                             log::warn!(
                                 "kanata-kbdflt: read error on {label} ({e}), reconnecting same interface"
                             );
