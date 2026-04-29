@@ -15,6 +15,8 @@ use std::io;
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
@@ -213,7 +215,12 @@ fn open_driver_path(path: *const u16) -> anyhow::Result<OwnedHandle> {
     Ok(unsafe { OwnedHandle::from_raw_handle(handle as _) })
 }
 
-fn try_open_driver_interface() -> anyhow::Result<OwnedHandle> {
+fn path_to_string(path: &[u16]) -> String {
+    let len = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+    String::from_utf16_lossy(&path[..len])
+}
+
+fn enumerate_driver_interface_paths() -> anyhow::Result<Vec<Vec<u16>>> {
     let dev_info = unsafe {
         SetupDiGetClassDevsW(
             &GUID_DEVINTERFACE_KBFILTER,
@@ -229,8 +236,10 @@ fn try_open_driver_interface() -> anyhow::Result<OwnedHandle> {
         );
     }
 
+    let mut paths = Vec::new();
     let mut index = 0;
-    let result = loop {
+
+    loop {
         let mut iface = SP_DEVICE_INTERFACE_DATA {
             cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
             ..unsafe { std::mem::zeroed() }
@@ -246,10 +255,7 @@ fn try_open_driver_interface() -> anyhow::Result<OwnedHandle> {
             )
         };
         if ok == 0 {
-            break Err(anyhow::anyhow!(
-                "no present kanata-kbdflt device interface found: {}",
-                io::Error::last_os_error()
-            ));
+            break;
         }
 
         let mut required = 0u32;
@@ -286,25 +292,54 @@ fn try_open_driver_interface() -> anyhow::Result<OwnedHandle> {
             )
         };
         if ok != 0 {
-            let open_result = unsafe { open_driver_path((*detail).DevicePath.as_ptr()) };
-            if open_result.is_ok() {
-                break open_result;
+            unsafe {
+                let p = (*detail).DevicePath.as_ptr();
+                let mut len = 0usize;
+                while *p.add(len) != 0 {
+                    len += 1;
+                }
+                paths.push(std::slice::from_raw_parts(p, len + 1).to_vec());
             }
         }
 
         index += 1;
-    };
+    }
 
     unsafe {
         SetupDiDestroyDeviceInfoList(dev_info);
     }
 
-    result
+    if paths.is_empty() {
+        anyhow::bail!(
+            "no present kanata-kbdflt device interface found: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    Ok(paths)
 }
 
-fn try_open_driver() -> anyhow::Result<OwnedHandle> {
+fn try_open_driver_interface() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
+    let mut last_err = None;
+
+    for path in enumerate_driver_interface_paths()? {
+        match open_driver_path(path.as_ptr()) {
+            Ok(handle) => return Ok((handle, path)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    anyhow::bail!(
+        "all present kanata-kbdflt device interfaces failed to open; last error: {}",
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+}
+
+fn try_open_driver() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
     match open_driver_path(DEVICE_PATH.as_ptr()) {
-        Ok(handle) => Ok(handle),
+        Ok(handle) => Ok((handle, DEVICE_PATH.to_vec())),
         Err(named_err) => {
             try_open_driver_interface().map_err(|iface_err| {
                 anyhow::anyhow!(
@@ -315,7 +350,7 @@ fn try_open_driver() -> anyhow::Result<OwnedHandle> {
     }
 }
 
-fn open_driver_with_retry() -> anyhow::Result<OwnedHandle> {
+fn open_driver_with_retry() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
     let mut delay = Duration::from_millis(100);
     loop {
         match try_open_driver() {
@@ -329,15 +364,81 @@ fn open_driver_with_retry() -> anyhow::Result<OwnedHandle> {
     }
 }
 
+fn open_all_driver_interfaces_once() -> anyhow::Result<Vec<(OwnedHandle, Vec<u16>)>> {
+    let paths = enumerate_driver_interface_paths()?;
+    let mut opened = Vec::new();
+
+    for path in paths {
+        let label = path_to_string(&path);
+        match open_driver_path(path.as_ptr()) {
+            Ok(handle) => opened.push((handle, path)),
+            Err(e) => log::warn!("kanata-kbdflt: open interface {label} failed: {e}"),
+        }
+    }
+
+    if opened.is_empty() {
+        anyhow::bail!("no kanata-kbdflt device interface could be opened");
+    }
+
+    Ok(opened)
+}
+
+fn open_all_driver_interfaces_with_retry() -> anyhow::Result<Vec<(OwnedHandle, Vec<u16>)>> {
+    let mut delay = Duration::from_millis(100);
+    loop {
+        match open_all_driver_interfaces_once() {
+            Ok(handles) => return Ok(handles),
+            Err(e) => {
+                log::warn!("kanata-kbdflt: open all interfaces failed ({e}), retry in {delay:?}");
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
 struct KmdfHandle {
     handle: OwnedHandle,
+    path: Vec<u16>,
 }
 
 impl KmdfHandle {
     fn open() -> anyhow::Result<Self> {
-        Ok(Self {
-            handle: open_driver_with_retry()?,
-        })
+        let (handle, path) = open_driver_with_retry()?;
+        Ok(Self { handle, path })
+    }
+
+    fn open_all_interfaces() -> anyhow::Result<Vec<Self>> {
+        Ok(open_all_driver_interfaces_with_retry()?
+            .into_iter()
+            .map(|(handle, path)| Self { handle, path })
+            .collect())
+    }
+
+    fn label(&self) -> String {
+        path_to_string(&self.path)
+    }
+
+    fn reopen_same_path(&mut self) -> anyhow::Result<()> {
+        self.handle = open_driver_path(self.path.as_ptr())?;
+        Ok(())
+    }
+
+    fn reopen_same_path_with_retry(&mut self) {
+        let mut delay = Duration::from_millis(100);
+        loop {
+            match self.reopen_same_path() {
+                Ok(()) => return,
+                Err(e) => {
+                    let label = self.label();
+                    log::warn!(
+                        "kanata-kbdflt: reopen {label} failed ({e}), retry in {delay:?}"
+                    );
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                }
+            }
+        }
     }
 
     fn raw(&self) -> isize {
@@ -413,40 +514,69 @@ impl KmdfHandle {
 // ---------------------------------------------------------------------------
 
 pub struct KbdIn {
-    drv: KmdfHandle,
+    rx: Receiver<InputEvent>,
     pending: VecDeque<InputEvent>,
+    _threads: Vec<JoinHandle<()>>,
 }
 
 impl KbdIn {
     pub fn new() -> anyhow::Result<Self> {
-        log::info!("kanata-kbdflt: opening \\.\\ KanataKeyboard for input");
+        log::info!("kanata-kbdflt: opening all present keyboard filter interfaces for input");
+
+        let handles = KmdfHandle::open_all_interfaces()?;
+        log::info!("kanata-kbdflt: opened {} input interface(s)", handles.len());
+
+        let (tx, rx) = mpsc::channel();
+        let mut threads = Vec::with_capacity(handles.len());
+
+        for mut drv in handles {
+            let tx = tx.clone();
+            let label = drv.label();
+
+            threads.push(std::thread::spawn(move || {
+                log::info!("kanata-kbdflt: input reader started for {label}");
+
+                loop {
+                    match drv.read_events() {
+                        Ok(events) => {
+                            for event in events {
+                                if tx.send(event).is_err() {
+                                    log::info!(
+                                        "kanata-kbdflt: input reader exiting for {label}; receiver closed"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "kanata-kbdflt: read error on {label} ({e}), reconnecting same interface"
+                            );
+                            drv.reopen_same_path_with_retry();
+                        }
+                    }
+                }
+            }));
+        }
+
+        drop(tx);
+
         Ok(Self {
-            drv: KmdfHandle::open()?,
+            rx,
             pending: VecDeque::new(),
+            _threads: threads,
         })
     }
 
-    /// Blocking read; returns one event at a time, reconnecting on error.
+    /// Blocking read; returns one event at a time from any attached keyboard stack.
     pub fn read(&mut self) -> anyhow::Result<InputEvent> {
-        loop {
-            if let Some(event) = self.pending.pop_front() {
-                return Ok(event);
-            }
-
-            match self.drv.read_events() {
-                Ok(mut evts) if !evts.is_empty() => {
-                    let first = evts.remove(0);
-                    self.pending.extend(evts);
-                    return Ok(first);
-                }
-                Ok(_) => {} // empty — retry immediately
-                Err(e) => {
-                    log::warn!("kanata-kbdflt: read error ({e}), reconnecting…");
-                    self.drv = KmdfHandle::open()?;
-                    self.pending.clear();
-                }
-            }
+        if let Some(event) = self.pending.pop_front() {
+            return Ok(event);
         }
+
+        self.rx.recv().map_err(|e| {
+            anyhow::anyhow!("kanata-kbdflt: all input reader threads stopped: {e}")
+        })
     }
 }
 
