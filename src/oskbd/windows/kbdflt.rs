@@ -10,12 +10,12 @@
 //!
 //! Selected by `--features kmdf_driver`.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io;
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -524,62 +524,26 @@ fn is_read_events_busy(err: &anyhow::Error) -> bool {
 pub struct KbdIn {
     rx: Receiver<InputEvent>,
     pending: VecDeque<InputEvent>,
-    _threads: Vec<JoinHandle<()>>,
+    _manager: JoinHandle<()>,
+}
+
+#[derive(Debug)]
+enum ReaderExit {
+    Stopped { label: String },
+    Busy { label: String },
 }
 
 impl KbdIn {
     pub fn new() -> anyhow::Result<Self> {
-        log::info!("kanata-kbdflt: opening all present keyboard filter interfaces for input");
+        log::info!("kanata-kbdflt: starting input interface manager");
 
-        let handles = KmdfHandle::open_all_interfaces()?;
-        log::info!("kanata-kbdflt: opened {} input interface(s)", handles.len());
-
-        let (tx, rx) = mpsc::channel();
-        let mut threads = Vec::with_capacity(handles.len());
-
-        for mut drv in handles {
-            let tx = tx.clone();
-            let label = drv.label();
-
-            threads.push(std::thread::spawn(move || {
-                log::info!("kanata-kbdflt: input reader started for {label}");
-
-                loop {
-                    match drv.read_events() {
-                        Ok(events) => {
-                            for event in events {
-                                if tx.send(event).is_err() {
-                                    log::info!(
-                                        "kanata-kbdflt: input reader exiting for {label}; receiver closed"
-                                    );
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if is_read_events_busy(&e) {
-                                log::warn!(
-                                    "kanata-kbdflt: read busy on {label}; disabling this input reader"
-                                );
-                                return;
-                            }
-
-                            log::warn!(
-                                "kanata-kbdflt: read error on {label} ({e}), reconnecting same interface"
-                            );
-                            drv.reopen_same_path_with_retry();
-                        }
-                    }
-                }
-            }));
-        }
-
-        drop(tx);
+        let (event_tx, rx) = mpsc::channel();
+        let manager = std::thread::spawn(move || input_interface_manager(event_tx));
 
         Ok(Self {
             rx,
             pending: VecDeque::new(),
-            _threads: threads,
+            _manager: manager,
         })
     }
 
@@ -592,6 +556,141 @@ impl KbdIn {
         self.rx.recv().map_err(|e| {
             anyhow::anyhow!("kanata-kbdflt: all input reader threads stopped: {e}")
         })
+    }
+}
+
+fn input_interface_manager(event_tx: Sender<InputEvent>) {
+    let (exit_tx, exit_rx) = mpsc::channel::<ReaderExit>();
+    let mut active = HashSet::<String>::new();
+    let mut busy = HashSet::<String>::new();
+    let mut first_success = false;
+
+    loop {
+        while let Ok(exit) = exit_rx.try_recv() {
+            match exit {
+                ReaderExit::Stopped { label } => {
+                    active.remove(&label);
+                    log::warn!(
+                        "kanata-kbdflt: input reader stopped for {label}; will rescan interfaces"
+                    );
+                }
+                ReaderExit::Busy { label } => {
+                    active.remove(&label);
+                    busy.insert(label.clone());
+                    log::warn!(
+                        "kanata-kbdflt: read busy on {label}; disabling this input reader until device list changes"
+                    );
+                }
+            }
+        }
+
+        let paths = match enumerate_driver_interface_paths() {
+            Ok(paths) => paths,
+            Err(e) => {
+                if !first_success {
+                    log::warn!("kanata-kbdflt: no input interfaces yet ({e}); retrying");
+                } else {
+                    log::warn!("kanata-kbdflt: input interface rescan failed ({e}); retrying");
+                }
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+        };
+
+        let present = paths
+            .iter()
+            .map(|p| path_to_string(p))
+            .collect::<HashSet<_>>();
+
+        // If an interface disappeared, forget its old state. A replug usually creates a new
+        // device path, and this also lets a formerly busy path become eligible after removal.
+        active.retain(|label| present.contains(label));
+        busy.retain(|label| present.contains(label));
+
+        let mut opened_this_scan = 0usize;
+        for path in paths {
+            let label = path_to_string(&path);
+            if active.contains(&label) || busy.contains(&label) {
+                continue;
+            }
+
+            match open_driver_path(path.as_ptr()) {
+                Ok(handle) => {
+                    let drv = KmdfHandle { handle, path };
+                    active.insert(label.clone());
+                    opened_this_scan += 1;
+                    spawn_input_reader(drv, label, event_tx.clone(), exit_tx.clone());
+                }
+                Err(e) => {
+                    log::warn!("kanata-kbdflt: open input interface {label} failed: {e}");
+                }
+            }
+        }
+
+        if opened_this_scan > 0 {
+            first_success = true;
+            log::info!(
+                "kanata-kbdflt: opened {opened_this_scan} new input interface(s); active={}, busy={}",
+                active.len(),
+                busy.len()
+            );
+        }
+
+        if active.is_empty() && !busy.is_empty() {
+            log::warn!(
+                "kanata-kbdflt: no active input readers; {} interface(s) are busy/disabled",
+                busy.len()
+            );
+        }
+
+        // Polling is deliberate: SetupDi enumeration is cheap here, and this avoids needing
+        // a hidden message window for WM_DEVICECHANGE in the console/service process.
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn spawn_input_reader(
+    drv: KmdfHandle,
+    label: String,
+    event_tx: Sender<InputEvent>,
+    exit_tx: Sender<ReaderExit>,
+) {
+    std::thread::spawn(move || input_reader_thread(drv, label, event_tx, exit_tx));
+}
+
+fn input_reader_thread(
+    drv: KmdfHandle,
+    label: String,
+    event_tx: Sender<InputEvent>,
+    exit_tx: Sender<ReaderExit>,
+) {
+    log::info!("kanata-kbdflt: input reader started for {label}");
+
+    loop {
+        match drv.read_events() {
+            Ok(events) => {
+                for event in events {
+                    if event_tx.send(event).is_err() {
+                        log::info!(
+                            "kanata-kbdflt: input reader exiting for {label}; receiver closed"
+                        );
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                if is_read_events_busy(&e) {
+                    let _ = exit_tx.send(ReaderExit::Busy { label });
+                    return;
+                }
+
+                log::warn!(
+                    "kanata-kbdflt: read error on {label} ({e}); reader stopped, manager will rescan"
+                );
+                let _ = exit_tx.send(ReaderExit::Stopped { label });
+                return;
+            }
+        }
     }
 }
 
