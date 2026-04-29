@@ -364,39 +364,6 @@ fn open_driver_with_retry() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
     }
 }
 
-fn open_all_driver_interfaces_once() -> anyhow::Result<Vec<(OwnedHandle, Vec<u16>)>> {
-    let paths = enumerate_driver_interface_paths()?;
-    let mut opened = Vec::new();
-
-    for path in paths {
-        let label = path_to_string(&path);
-        match open_driver_path(path.as_ptr()) {
-            Ok(handle) => opened.push((handle, path)),
-            Err(e) => log::warn!("kanata-kbdflt: open interface {label} failed: {e}"),
-        }
-    }
-
-    if opened.is_empty() {
-        anyhow::bail!("no kanata-kbdflt device interface could be opened");
-    }
-
-    Ok(opened)
-}
-
-fn open_all_driver_interfaces_with_retry() -> anyhow::Result<Vec<(OwnedHandle, Vec<u16>)>> {
-    let mut delay = Duration::from_millis(100);
-    loop {
-        match open_all_driver_interfaces_once() {
-            Ok(handles) => return Ok(handles),
-            Err(e) => {
-                log::warn!("kanata-kbdflt: open all interfaces failed ({e}), retry in {delay:?}");
-                std::thread::sleep(delay);
-                delay = (delay * 2).min(Duration::from_secs(5));
-            }
-        }
-    }
-}
-
 struct KmdfHandle {
     handle: OwnedHandle,
     path: Vec<u16>,
@@ -406,39 +373,6 @@ impl KmdfHandle {
     fn open() -> anyhow::Result<Self> {
         let (handle, path) = open_driver_with_retry()?;
         Ok(Self { handle, path })
-    }
-
-    fn open_all_interfaces() -> anyhow::Result<Vec<Self>> {
-        Ok(open_all_driver_interfaces_with_retry()?
-            .into_iter()
-            .map(|(handle, path)| Self { handle, path })
-            .collect())
-    }
-
-    fn label(&self) -> String {
-        path_to_string(&self.path)
-    }
-
-    fn reopen_same_path(&mut self) -> anyhow::Result<()> {
-        self.handle = open_driver_path(self.path.as_ptr())?;
-        Ok(())
-    }
-
-    fn reopen_same_path_with_retry(&mut self) {
-        let mut delay = Duration::from_millis(100);
-        loop {
-            match self.reopen_same_path() {
-                Ok(()) => return,
-                Err(e) => {
-                    let label = self.label();
-                    log::warn!(
-                        "kanata-kbdflt: reopen {label} failed ({e}), retry in {delay:?}"
-                    );
-                    std::thread::sleep(delay);
-                    delay = (delay * 2).min(Duration::from_secs(5));
-                }
-            }
-        }
     }
 
     fn raw(&self) -> isize {
