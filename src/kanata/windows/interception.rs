@@ -41,6 +41,11 @@ impl Kanata {
 
             check_for_exit(&key_event);
 
+            if !MAPPED_KEYS.lock().contains(&key_event.code) {
+                kanata.lock().kbd_out.write(in_event)?;
+                continue;
+            }
+
             match key_event.value {
                 KeyValue::Release => {
                     PRESSED_KEYS.lock().remove(&key_event.code);
@@ -57,15 +62,6 @@ impl Kanata {
             }
 
             if key_event.value == KeyValue::Repeat && !allow_hardware_repeat {
-                continue;
-            }
-
-            if !MAPPED_KEYS.lock().contains(&key_event.code) {
-                let mut kanata = kanata.lock();
-                kanata
-                    .kbd_out
-                    .write(in_event)
-                    .map_err(|e| anyhow!("failed write: {e}"))?;
                 continue;
             }
 
