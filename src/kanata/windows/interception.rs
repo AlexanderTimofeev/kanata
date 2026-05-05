@@ -17,14 +17,7 @@ use kanata_parser::keys::OsCode;
 #[cfg(feature = "kmdf_driver")]
 impl Kanata {
     pub fn event_loop_inner(kanata: Arc<Mutex<Self>>, tx: Sender<KeyEvent>) -> Result<()> {
-        let (allow_hardware_repeat, mouse_movement_key) = {
-            let k = kanata.lock();
-            (k.allow_hardware_repeat, k.mouse_movement_key.clone())
-        };
-
-        if mouse_movement_key.lock().is_some() {
-            log::warn!("kmdf_driver does not provide mouse input interception");
-        }
+        let allow_hardware_repeat = kanata.lock().allow_hardware_repeat;
 
         let mut kbd_in = KbdIn::new()
             .map_err(|e| anyhow!("failed to open kanata-kbdflt input device: {e}"))?;

@@ -236,19 +236,19 @@ pub struct Kanata {
     /// Has no effect on Interception. Fixes some use cases related to admin window permissions and
     /// potentially locking via Win+L.
     pub windows_sync_keystates: bool,
-    #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+    #[cfg(all(feature = "interception_driver", target_os = "windows"))]
     /// Used to know which input device to treat as a mouse for intercepting and processing inputs
     /// by kanata.
     intercept_mouse_hwids: Option<Vec<[u8; HWID_ARR_SZ]>>,
-    #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+    #[cfg(all(feature = "interception_driver", target_os = "windows"))]
     /// Used to know which mouse input devices to exclude from processing inputs by kanata. This is
     /// mutually exclusive from `intercept_mouse_hwids` and kanata will panic if both are included.
     intercept_mouse_hwids_exclude: Option<Vec<[u8; HWID_ARR_SZ]>>,
-    #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+    #[cfg(all(feature = "interception_driver", target_os = "windows"))]
     /// Used to know which input device to treat as a keyboard for intercepting and processing inputs
     /// by kanata.
     intercept_kb_hwids: Option<Vec<[u8; HWID_ARR_SZ]>>,
-    #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+    #[cfg(all(feature = "interception_driver", target_os = "windows"))]
     /// Used to know which keyboard input devices to exclude from processing inputs by kanata. This
     /// is mutually exclusive from `intercept_kb_hwids` and kanata will panic if both are included.
     intercept_kb_hwids_exclude: Option<Vec<[u8; HWID_ARR_SZ]>>,
@@ -317,7 +317,7 @@ pub struct Kanata {
     pub saved_clipboard_content: SavedClipboardData,
     // if set, key taps of this code are sent whenever mouse movement events are passed through
     #[cfg(any(
-        all(target_os = "windows", any(feature = "interception_driver", feature = "kmdf_driver")),
+        all(target_os = "windows", feature = "interception_driver"),
         target_os = "linux",
         target_os = "android",
         target_os = "macos",
@@ -485,19 +485,19 @@ impl Kanata {
             exclude_names: cfg.options.linux_opts.linux_dev_names_exclude,
             #[cfg(target_os = "windows")]
             windows_sync_keystates: cfg.options.windows_opts.sync_keystates,
-            #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+            #[cfg(all(feature = "interception_driver", target_os = "windows"))]
             intercept_mouse_hwids: cfg.options.wintercept_opts.windows_interception_mouse_hwids,
-            #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+            #[cfg(all(feature = "interception_driver", target_os = "windows"))]
             intercept_mouse_hwids_exclude: cfg
                 .options
                 .wintercept_opts
                 .windows_interception_mouse_hwids_exclude,
-            #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+            #[cfg(all(feature = "interception_driver", target_os = "windows"))]
             intercept_kb_hwids: cfg
                 .options
                 .wintercept_opts
                 .windows_interception_keyboard_hwids,
-            #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+            #[cfg(all(feature = "interception_driver", target_os = "windows"))]
             intercept_kb_hwids_exclude: cfg
                 .options
                 .wintercept_opts
@@ -543,7 +543,7 @@ impl Kanata {
             macro_on_press_cancel_duration: 0,
             saved_clipboard_content: Default::default(),
             #[cfg(any(
-                all(target_os = "windows", any(feature = "interception_driver", feature = "kmdf_driver")),
+                all(target_os = "windows", feature = "interception_driver"),
                 any(target_os = "linux", target_os = "android"),
                 target_os = "macos",
                 target_os = "unknown"
@@ -636,19 +636,19 @@ impl Kanata {
             exclude_names: cfg.options.linux_opts.linux_dev_names_exclude,
             #[cfg(target_os = "windows")]
             windows_sync_keystates: cfg.options.windows_opts.sync_keystates,
-            #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+            #[cfg(all(feature = "interception_driver", target_os = "windows"))]
             intercept_mouse_hwids: cfg.options.wintercept_opts.windows_interception_mouse_hwids,
-            #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+            #[cfg(all(feature = "interception_driver", target_os = "windows"))]
             intercept_mouse_hwids_exclude: cfg
                 .options
                 .wintercept_opts
                 .windows_interception_mouse_hwids_exclude,
-            #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+            #[cfg(all(feature = "interception_driver", target_os = "windows"))]
             intercept_kb_hwids: cfg
                 .options
                 .wintercept_opts
                 .windows_interception_keyboard_hwids,
-            #[cfg(all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"))]
+            #[cfg(all(feature = "interception_driver", target_os = "windows"))]
             intercept_kb_hwids_exclude: cfg
                 .options
                 .wintercept_opts
@@ -694,7 +694,7 @@ impl Kanata {
             macro_on_press_cancel_duration: 0,
             saved_clipboard_content: Default::default(),
             #[cfg(any(
-                all(target_os = "windows", any(feature = "interception_driver", feature = "kmdf_driver")),
+                all(target_os = "windows", feature = "interception_driver"),
                 target_os = "linux",
                 target_os = "android",
                 target_os = "macos",
@@ -809,14 +809,14 @@ impl Kanata {
         self.macro_on_press_cancel_duration = 0;
 
         #[cfg(any(
-            all(target_os = "windows", any(feature = "interception_driver", feature = "kmdf_driver")),
+            all(target_os = "windows", feature = "interception_driver"),
             target_os = "linux",
             target_os = "android",
             target_os = "macos",
             target_os = "unknown"
         ))]
         {
-            #[cfg(all(target_os = "windows", any(feature = "interception_driver", feature = "kmdf_driver")))]
+            #[cfg(all(target_os = "windows", feature = "interception_driver"))]
             {
                 if self.mouse_movement_key.lock().is_none()
                     && cfg.options.mouse_movement_key.is_some()

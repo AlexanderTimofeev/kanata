@@ -47,11 +47,11 @@ pub use scancode_to_usvk::*;
 
 #[cfg(feature = "interception_driver")]
 mod interception;
-#[cfg(any(feature = "interception_driver", feature = "kmdf_driver"))]
+#[cfg(feature = "interception_driver")]
 mod interception_convert;
 #[cfg(feature = "interception_driver")]
 pub use self::interception::*;
-#[cfg(any(feature = "interception_driver", feature = "kmdf_driver"))]
+#[cfg(feature = "interception_driver")]
 pub use interception_convert::*;
 
 #[cfg(feature = "kmdf_driver")]
