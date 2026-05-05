@@ -99,7 +99,7 @@ impl std::fmt::Display for InputEvent {
 }
 
 impl InputEvent {
-    pub fn from_oscode(code: OsCode, val: KeyValue) -> Self {
+    pub fn from_oscode(code: OsCode, val: KeyValue) -> Result<Self, io::Error> {
         let sc = osc_to_u16(code).unwrap_or_else(|| {
             log::error!("kmdf: no scancode for {code:?}, sending 0");
             0
@@ -108,7 +108,9 @@ impl InputEvent {
         let mut flags: u16 = match val {
             KeyValue::Press | KeyValue::Repeat => KANATA_KEY_MAKE,
             KeyValue::Release => KANATA_KEY_BREAK,
-            KeyValue::Tap | KeyValue::WakeUp => panic!("invalid KeyValue for injection"),
+            KeyValue::Tap | KeyValue::WakeUp => {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("invalid KeyValue for injection: {val:?}")));
+            }
         };
 
         match sc >> 8 {
@@ -117,10 +119,10 @@ impl InputEvent {
             _ => {}
         }
 
-        Self {
+        Ok(Self {
             make_code: sc & 0x00FF,
             flags,
-        }
+        })
     }
 }
 
@@ -155,8 +157,10 @@ impl TryFrom<InputEvent> for crate::oskbd::KeyEvent {
     }
 }
 
-impl From<crate::oskbd::KeyEvent> for InputEvent {
-    fn from(ev: crate::oskbd::KeyEvent) -> Self {
+impl TryFrom<crate::oskbd::KeyEvent> for InputEvent {
+    type Error = io::Error;
+
+    fn try_from(ev: crate::oskbd::KeyEvent) -> Result<Self, Self::Error> {
         Self::from_oscode(ev.code, ev.value)
     }
 }
@@ -661,7 +665,8 @@ impl KbdOut {
     }
 
     pub fn write_key(&mut self, key: OsCode, value: KeyValue) -> Result<(), io::Error> {
-        self.write(InputEvent::from_oscode(key, value))
+        let event = InputEvent::from_oscode(key, value)?;
+        self.write(event)
     }
 
     pub fn write_code(&mut self, code: u32, value: KeyValue) -> Result<(), io::Error> {
