@@ -100,10 +100,9 @@ impl std::fmt::Display for InputEvent {
 
 impl InputEvent {
     pub fn from_oscode(code: OsCode, val: KeyValue) -> Result<Self, io::Error> {
-        let sc = osc_to_u16(code).unwrap_or_else(|| {
-            log::error!("kmdf: no scancode for {code:?}, sending 0");
-            0
-        });
+        let sc = osc_to_u16(code).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("no scancode for {code:?}"))
+        })?;
 
         let mut flags: u16 = match val {
             KeyValue::Press | KeyValue::Repeat => KANATA_KEY_MAKE,
