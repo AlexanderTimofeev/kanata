@@ -26,8 +26,9 @@ impl Kanata {
             let in_event = kbd_in.read().map_err(|e| anyhow!("failed read: {e}"))?;
             let mut key_event = match KeyEvent::try_from(in_event) {
                 Ok(event) => event,
-                Err(_) => {
-                    log::debug!("kmdf: could not map input event {in_event:?}");
+                Err(e) => {
+                    log::warn!("unknown keyboard event from driver, passing through: {e:?}");
+                    kanata.lock().kbd_out.write(in_event)?;
                     continue;
                 }
             };
