@@ -1,12 +1,12 @@
 //! Windows KMDF kernel-filter backend for reading/writing input events.
 //!
 //! Communicates with `kanata-kbdflt.sys` via two IOCTLs:
-//!   - `IOCTL_KANATA_READ_EVENTS`   — blocking read of suppressed key events
-//!   - `IOCTL_KANATA_INJECT_EVENTS` — inject remapped key events back through kbdclass
+//!   - `IOCTL_KANATA_READ_EVENTS`   - blocking read of suppressed key events
+//!   - `IOCTL_KANATA_INJECT_EVENTS` - inject remapped key events back through kbdclass
 //!
 //! Mouse events are handled via `SendInput` (the driver is keyboard-only).
 //!
-//! The driver rawPdo device is opened as `\\.\KanataKeyboard`.
+//! The driver raw PDO is opened by enumerating GUID_DEVINTERFACE_KBFILTER.
 //!
 //! Selected by `--features kmdf_driver`.
 
@@ -415,7 +415,7 @@ impl KmdfSession {
             return Err(err);
         }
 
-        let ok = unsafe { GetOverlappedResult(self.raw(), &overlapped, &mut returned, 1) };
+        let ok = unsafe { GetOverlappedResult(self.raw(), &mut overlapped, &mut returned, 1) };
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
