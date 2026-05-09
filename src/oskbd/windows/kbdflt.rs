@@ -137,10 +137,25 @@ impl InputEvent {
     }
 }
 
-impl TryFrom<InputEvent> for crate::oskbd::KeyEvent {
-    type Error = ();
+#[derive(Debug, Clone, Copy)]
+pub struct UnknownInputEvent {
+    pub make_code: u16,
+    pub normalized_make_code: u16,
+    pub flags: u16,
+    pub full_scancode: u16,
+}
 
-    fn try_from(ev: InputEvent) -> Result<Self, ()> {
+impl UnknownInputEvent {
+    pub fn is_fake_shift(&self) -> bool {
+        // E0 2A and E0 36 are "fake shifts" emitted by Windows for extended keys.
+        self.full_scancode == 0xE02A || self.full_scancode == 0xE036
+    }
+}
+
+impl TryFrom<InputEvent> for crate::oskbd::KeyEvent {
+    type Error = UnknownInputEvent;
+
+    fn try_from(ev: InputEvent) -> Result<Self, UnknownInputEvent> {
         use crate::oskbd::{KeyEvent, KeyValue};
 
         let is_break = (ev.flags & KANATA_KEY_BREAK) != 0;
@@ -155,7 +170,12 @@ impl TryFrom<InputEvent> for crate::oskbd::KeyEvent {
             ev.make_code
         };
 
-        let osc = u16_to_osc(full_sc).ok_or(())?;
+        let osc = u16_to_osc(full_sc).ok_or_else(|| UnknownInputEvent {
+            make_code: ev.make_code,
+            normalized_make_code: ev.make_code,
+            flags: ev.flags,
+            full_scancode: full_sc,
+        })?;
 
         Ok(KeyEvent {
             code: osc,

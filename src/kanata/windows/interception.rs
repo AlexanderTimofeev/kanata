@@ -37,7 +37,9 @@ impl Kanata {
             let mut key_event = match KeyEvent::try_from(in_event) {
                 Ok(event) => event,
                 Err(e) => {
-                    log::warn!("unknown keyboard event from driver, passing through: {e:?}");
+                    if !e.is_fake_shift() {
+                        log::warn!("unknown keyboard event from driver, passing through: {e:?}");
+                    }
                     sourced.session.inject_events(&[in_event])?;
                     continue;
                 }
