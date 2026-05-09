@@ -176,28 +176,7 @@ impl TryFrom<crate::oskbd::KeyEvent> for InputEvent {
 // Driver I/O
 // ---------------------------------------------------------------------------
 
-/// `\\.\KanataKeyboard\0` as a UTF-16 literal.
-static DEVICE_PATH: &[u16] = &[
-    b'\\' as u16,
-    b'\\' as u16,
-    b'.' as u16,
-    b'\\' as u16,
-    b'K' as u16,
-    b'a' as u16,
-    b'n' as u16,
-    b'a' as u16,
-    b't' as u16,
-    b'a' as u16,
-    b'K' as u16,
-    b'e' as u16,
-    b'y' as u16,
-    b'b' as u16,
-    b'o' as u16,
-    b'a' as u16,
-    b'r' as u16,
-    b'd' as u16,
-    0u16,
-];
+// Stale named path \\.\KanataKeyboard removed; use interface enumeration instead.
 
 const GUID_DEVINTERFACE_KBFILTER: windows_sys::core::GUID = windows_sys::core::GUID {
     data1: 0x3fb7299d,
@@ -349,16 +328,7 @@ fn try_open_driver_interface() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
 }
 
 fn try_open_driver() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
-    match open_driver_path(DEVICE_PATH.as_ptr()) {
-        Ok(handle) => Ok((handle, DEVICE_PATH.to_vec())),
-        Err(named_err) => {
-            try_open_driver_interface().map_err(|iface_err| {
-                anyhow::anyhow!(
-                    "CreateFileW(\\\\.\\KanataKeyboard) failed: {named_err}; interface open failed: {iface_err}"
-                )
-            })
-        }
-    }
+    try_open_driver_interface()
 }
 
 fn open_driver_with_retry() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
@@ -427,7 +397,7 @@ pub(crate) struct KmdfSession {
 }
 
 impl KmdfSession {
-    fn open(path: Vec<u16>) -> anyhow::Result<Self> {
+    pub(crate) fn open(path: Vec<u16>) -> anyhow::Result<Self> {
         let handle = open_driver_path(path.as_ptr())?;
         let label = path_to_string(&path);
         Ok(Self {
@@ -485,7 +455,7 @@ impl KmdfSession {
         Ok(returned)
     }
 
-    fn read_events(&self) -> anyhow::Result<Vec<InputEvent>> {
+    pub(crate) fn read_events(&self) -> anyhow::Result<Vec<InputEvent>> {
         const CAP: usize = 32;
         let mut buf = [KanataWireEvent::default(); CAP];
 
@@ -507,7 +477,7 @@ impl KmdfSession {
             .collect())
     }
 
-    fn inject_events(&self, events: &[InputEvent]) -> anyhow::Result<()> {
+    pub(crate) fn inject_events(&self, events: &[InputEvent]) -> anyhow::Result<()> {
         if events.is_empty() {
             return Ok(());
         }
@@ -759,10 +729,12 @@ impl KbdOut {
         self.write(event)
     }
 
+    /// Note: write_code currently bypasses the KMDF driver and uses SendInput (legacy).
     pub fn write_code(&mut self, code: u32, value: KeyValue) -> Result<(), io::Error> {
         super::write_code(code as u16, value)
     }
 
+    /// Note: write_code_raw currently bypasses the KMDF driver and uses SendInput (legacy).
     pub fn write_code_raw(&mut self, code: u16, value: KeyValue) -> Result<(), io::Error> {
         super::write_code_raw(code, value)
     }
