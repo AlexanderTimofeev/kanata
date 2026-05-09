@@ -15,6 +15,7 @@ use std::io;
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -30,7 +31,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
 };
-use windows_sys::Win32::System::IO::{DeviceIoControl, GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::IO::{
+    CancelIoEx, DeviceIoControl, GetOverlappedResult, OVERLAPPED,
+};
 use windows_sys::Win32::System::Threading::CreateEventW;
 
 use once_cell::sync::Lazy;
@@ -69,6 +72,14 @@ const IOCTL_KANATA_INJECT_EVENTS: u32 = ctl_code(
     METHOD_BUFFERED,
     FILE_WRITE_DATA_ACC,
 );
+const IOCTL_KANATA_GET_VERSION: u32 = ctl_code(
+    KANATA_IOCTL_BASE,
+    0x805,
+    METHOD_BUFFERED,
+    FILE_READ_DATA_ACC,
+);
+
+const KANATA_EXPECTED_DRIVER_VERSION: u32 = 1;
 
 const KANATA_KEY_MAKE: u16 = 0x0000;
 const KANATA_KEY_BREAK: u16 = 0x0001;
@@ -350,6 +361,15 @@ impl SessionRegistry {
         sessions.retain(|s| s.strong_count() > 0);
         sessions.iter().find_map(|s| s.upgrade())
     }
+
+    fn cancel_all(&self) {
+        let sessions = self.sessions.lock();
+        for weak in sessions.iter() {
+            if let Some(session) = weak.upgrade() {
+                session.cancel_io();
+            }
+        }
+    }
 }
 
 struct OwnedEvent(HANDLE);
@@ -387,15 +407,48 @@ impl KmdfSession {
     pub(crate) fn open(path: Vec<u16>) -> anyhow::Result<Self> {
         let handle = open_driver_path(path.as_ptr())?;
         let label = path_to_string(&path);
-        Ok(Self {
+        let session = Self {
             handle,
             label,
             inject_lock: Mutex::new(()),
-        })
+        };
+
+        let version = session.get_version().map_err(|e| {
+            anyhow::anyhow!("failed to query driver version: {e}")
+        })?;
+
+        if version != KANATA_EXPECTED_DRIVER_VERSION {
+            anyhow::bail!(
+                "driver version mismatch for {}: expected {}, got {}",
+                session.label,
+                KANATA_EXPECTED_DRIVER_VERSION,
+                version
+            );
+        }
+
+        Ok(session)
+    }
+
+    pub(crate) fn get_version(&self) -> io::Result<u32> {
+        let mut version: u32 = 0;
+        self.ioctl_overlapped(
+            IOCTL_KANATA_GET_VERSION,
+            ptr::null(),
+            0,
+            &mut version as *mut _ as *mut _,
+            size_of::<u32>() as u32,
+        )?;
+        Ok(version)
     }
 
     fn raw(&self) -> isize {
         self.handle.as_raw_handle() as isize
+    }
+
+    fn cancel_io(&self) {
+        unsafe {
+            CancelIoEx(self.raw() as _, ptr::null_mut());
+        }
     }
 
     fn ioctl_overlapped(
@@ -502,7 +555,20 @@ pub(crate) struct SourcedInputEvent {
 pub struct KbdIn {
     rx: Receiver<SourcedInputEvent>,
     pending: VecDeque<SourcedInputEvent>,
-    _manager: JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+    manager: Option<JoinHandle<()>>,
+}
+
+impl Drop for KbdIn {
+    fn drop(&mut self) {
+        log::info!("kanata-kbdflt: stopping input interface manager and readers");
+        self.shutdown.store(true, Ordering::SeqCst);
+        KMDF_SESSIONS.cancel_all();
+
+        if let Some(h) = self.manager.take() {
+            let _ = h.join();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -515,12 +581,17 @@ impl KbdIn {
         log::info!("kanata-kbdflt: starting input interface manager");
 
         let (event_tx, rx) = mpsc::channel();
-        let manager = std::thread::spawn(move || input_interface_manager(event_tx));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let manager_shutdown = shutdown.clone();
+
+        let manager =
+            std::thread::spawn(move || input_interface_manager(event_tx, manager_shutdown));
 
         Ok(Self {
             rx,
             pending: VecDeque::new(),
-            _manager: manager,
+            shutdown,
+            manager: Some(manager),
         })
     }
 
@@ -540,12 +611,16 @@ impl KbdIn {
     }
 }
 
-fn input_interface_manager(event_tx: Sender<SourcedInputEvent>) {
+fn input_interface_manager(event_tx: Sender<SourcedInputEvent>, shutdown: Arc<AtomicBool>) {
     let (exit_tx, exit_rx) = mpsc::channel::<ReaderExit>();
     let mut active = HashSet::<String>::new();
     let mut first_success = false;
 
     loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+
         while let Ok(exit) = exit_rx.try_recv() {
             match exit {
                 ReaderExit::Stopped { label } => {
@@ -592,7 +667,7 @@ fn input_interface_manager(event_tx: Sender<SourcedInputEvent>) {
                     KMDF_SESSIONS.register(&session);
                     active.insert(label.clone());
                     opened_this_scan += 1;
-                    spawn_input_reader(session, event_tx.clone(), exit_tx.clone());
+                    spawn_input_reader(session, event_tx.clone(), exit_tx.clone(), shutdown.clone());
                 }
                 Err(e) => {
                     log::warn!("kanata-kbdflt: open input interface {label} failed: {e}");
@@ -622,14 +697,16 @@ fn spawn_input_reader(
     session: Arc<KmdfSession>,
     event_tx: Sender<SourcedInputEvent>,
     exit_tx: Sender<ReaderExit>,
+    shutdown: Arc<AtomicBool>,
 ) {
-    std::thread::spawn(move || input_reader_thread(session, event_tx, exit_tx));
+    std::thread::spawn(move || input_reader_thread(session, event_tx, exit_tx, shutdown));
 }
 
 fn input_reader_thread(
     session: Arc<KmdfSession>,
     event_tx: Sender<SourcedInputEvent>,
     exit_tx: Sender<ReaderExit>,
+    shutdown: Arc<AtomicBool>,
 ) {
     log::info!("kanata-kbdflt: input reader started for {}", session.label);
 
@@ -651,6 +728,9 @@ fn input_reader_thread(
                 }
             }
             Err(e) => {
+                if shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
                 log::warn!(
                     "kanata-kbdflt: read error on {} ({e}); reader stopped, manager will rescan",
                     session.label
