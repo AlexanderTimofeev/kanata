@@ -134,7 +134,7 @@ win_manifest = ["dep:embed-resource", "dep:indoc", "dep:regex"]
 cargo-clippy = []
 cmd = ["kanata-parser/cmd"]
 interception_driver = ["dep:kanata-interception", "kanata-parser/interception_driver"]
-kmdf_driver = ["dep:windows-sys"]
+kmdf_driver = ["dep:windows-sys", "kanata-parser/kmdf_driver"]
 # kmdf_driver: use kanata-kbdflt.sys KMDF filter instead of Interception.
 # Requires the driver to be installed first; see driver2/driver/kanata_kbdflt.inf.
 simulated_output = ["dep:indoc"]

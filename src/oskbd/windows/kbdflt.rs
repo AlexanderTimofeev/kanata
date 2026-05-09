@@ -9,6 +9,10 @@
 //! The driver raw PDO is opened by enumerating GUID_DEVINTERFACE_KBFILTER.
 //!
 //! Selected by `--features kmdf_driver`.
+//!
+//! NOTE: This backend is intended as a modern, high-performance replacement for the
+//! Interception driver. It reuses the same configuration parameters (e.g. HWID filtering)
+//! to ensure a seamless transition for users.
 
 use std::collections::{HashSet, VecDeque};
 use std::io;
@@ -44,6 +48,7 @@ use crate::kanata::CalculatedMouseMove;
 use crate::oskbd::KeyValue;
 use crate::oskbd::osc_to_u16;
 use crate::oskbd::u16_to_osc;
+use kanata_parser::cfg::HWID_ARR_SZ;
 use kanata_parser::custom_action::*;
 use kanata_parser::keys::*;
 
@@ -235,6 +240,83 @@ fn path_to_string(path: &[u16]) -> String {
     String::from_utf16_lossy(&path[..len])
 }
 
+fn path_to_hwid_bytes(path: &[u16]) -> [u8; HWID_ARR_SZ] {
+    let mut out = [0u8; HWID_ARR_SZ];
+    let mut o = 0usize;
+
+    for &w in path.iter().take_while(|&&w| w != 0) {
+        if o + 1 >= HWID_ARR_SZ {
+            break;
+        }
+        let bytes = w.to_le_bytes();
+        out[o] = bytes[0];
+        out[o + 1] = bytes[1];
+        o += 2;
+    }
+
+    out
+}
+
+fn hwid_bytes_to_lossy_string(bytes: &[u8; HWID_ARR_SZ]) -> String {
+    // KMDF interface paths are stored here as UTF-16LE bytes by path_to_hwid_bytes().
+    // Do not search for the first zero *byte*: ASCII UTF-16LE has a zero high byte
+    // after every character, so that would truncate "\\?\..." to just "\\".
+    let looks_utf16le_ascii = bytes.len() >= 4 && bytes[1] == 0 && bytes[3] == 0;
+
+    if looks_utf16le_ascii {
+        let words = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .take_while(|&w| w != 0)
+            .collect::<Vec<_>>();
+
+        return String::from_utf16_lossy(&words);
+    }
+
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).to_string()
+}
+
+fn hwid_entry_matches(candidate: &[u8; HWID_ARR_SZ], configured: &[u8; HWID_ARR_SZ]) -> bool {
+    if candidate == configured {
+        return true;
+    }
+
+    let candidate_s = hwid_bytes_to_lossy_string(candidate).to_ascii_uppercase();
+    let configured_s = hwid_bytes_to_lossy_string(configured).to_ascii_uppercase();
+
+    !configured_s.is_empty()
+        && (candidate_s.contains(&configured_s) || configured_s.contains(&candidate_s))
+}
+
+fn kmdf_interface_allowed(
+    hwid: &[u8; HWID_ARR_SZ],
+    allowed_hwids: &Option<Vec<[u8; HWID_ARR_SZ]>>,
+    excluded_hwids: &Option<Vec<[u8; HWID_ARR_SZ]>>,
+) -> bool {
+    match (allowed_hwids, excluded_hwids) {
+        (None, None) => true,
+        (Some(allowed), None) => {
+            let allowed: &Vec<[u8; HWID_ARR_SZ]> = allowed;
+            allowed
+                .iter()
+                .any(|configured| hwid_entry_matches(hwid, configured))
+        }
+        (None, Some(excluded)) => {
+            let excluded: &Vec<[u8; HWID_ARR_SZ]> = excluded;
+            !excluded
+                .iter()
+                .any(|configured| hwid_entry_matches(hwid, configured))
+        }
+        (Some(_), Some(_)) => {
+            log::warn!(
+                "kanata-kbdflt: both include and exclude HWID filters are set; rejecting interface"
+            );
+            false
+        }
+    }
+}
+
 fn enumerate_driver_interface_paths() -> anyhow::Result<Vec<Vec<u16>>> {
     let dev_info = unsafe {
         SetupDiGetClassDevsW(
@@ -392,6 +474,7 @@ impl Drop for OwnedEvent {
 pub(crate) struct KmdfSession {
     handle: OwnedHandle,
     label: String,
+    hwid: [u8; HWID_ARR_SZ],
     inject_lock: Mutex<()>,
 }
 
@@ -399,11 +482,17 @@ impl KmdfSession {
     pub(crate) fn open(path: Vec<u16>) -> anyhow::Result<Self> {
         let handle = open_driver_path(path.as_ptr())?;
         let label = path_to_string(&path);
+        let hwid = path_to_hwid_bytes(&path);
         Ok(Self {
             handle,
             label,
+            hwid,
             inject_lock: Mutex::new(()),
         })
+    }
+
+    pub(crate) fn hwid(&self) -> &[u8; HWID_ARR_SZ] {
+        &self.hwid
     }
 
 
@@ -544,14 +633,22 @@ enum ReaderExit {
 
 impl KbdIn {
     pub fn new() -> anyhow::Result<Self> {
+        Self::new_filtered(None, None)
+    }
+
+    pub fn new_filtered(
+        allowed_hwids: Option<Vec<[u8; HWID_ARR_SZ]>>,
+        excluded_hwids: Option<Vec<[u8; HWID_ARR_SZ]>>,
+    ) -> anyhow::Result<Self> {
         log::info!("kanata-kbdflt: starting input interface manager");
 
         let (event_tx, rx) = mpsc::channel();
         let shutdown = Arc::new(AtomicBool::new(false));
         let manager_shutdown = shutdown.clone();
 
-        let manager =
-            std::thread::spawn(move || input_interface_manager(event_tx, manager_shutdown));
+        let manager = std::thread::spawn(move || {
+            input_interface_manager(event_tx, manager_shutdown, allowed_hwids, excluded_hwids)
+        });
 
         Ok(Self {
             rx,
@@ -577,7 +674,12 @@ impl KbdIn {
     }
 }
 
-fn input_interface_manager(event_tx: Sender<SourcedInputEvent>, shutdown: Arc<AtomicBool>) {
+fn input_interface_manager(
+    event_tx: Sender<SourcedInputEvent>,
+    shutdown: Arc<AtomicBool>,
+    allowed_hwids: Option<Vec<[u8; HWID_ARR_SZ]>>,
+    excluded_hwids: Option<Vec<[u8; HWID_ARR_SZ]>>,
+) {
     let (exit_tx, exit_rx) = mpsc::channel::<ReaderExit>();
     let mut active = HashSet::<String>::new();
     let mut first_success = false;
@@ -630,6 +732,13 @@ fn input_interface_manager(event_tx: Sender<SourcedInputEvent>, shutdown: Arc<At
             match KmdfSession::open(path) {
                 Ok(session) => {
                     let session = Arc::new(session);
+                    if !kmdf_interface_allowed(session.hwid(), &allowed_hwids, &excluded_hwids) {
+                        log::info!(
+                            "kanata-kbdflt: skipping input interface not matching HWID filters: {label}"
+                        );
+                        active.insert(label.clone()); // Mark as seen but ignored
+                        continue;
+                    }
                     KMDF_SESSIONS.register(&session);
                     active.insert(label.clone());
                     opened_this_scan += 1;
@@ -674,7 +783,11 @@ fn input_reader_thread(
     exit_tx: Sender<ReaderExit>,
     shutdown: Arc<AtomicBool>,
 ) {
-    log::info!("kanata-kbdflt: input reader started for {}", session.label);
+    log::info!(
+        "kanata-kbdflt: input reader started for {} (hwid/path {})",
+        session.label,
+        hwid_bytes_to_lossy_string(session.hwid())
+    );
 
     loop {
         match session.read_events() {

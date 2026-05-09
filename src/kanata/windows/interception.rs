@@ -19,8 +19,19 @@ impl Kanata {
     pub fn event_loop_inner(kanata: Arc<Mutex<Self>>, tx: Sender<KeyEvent>) -> Result<()> {
         let allow_hardware_repeat = kanata.lock().allow_hardware_repeat;
 
-        let mut kbd_in =
-            KbdIn::new().map_err(|e| anyhow!("failed to open kanata-kbdflt input device: {e}"))?;
+        let (keyboards_to_intercept_hwids, keyboards_to_intercept_hwids_exclude) = {
+            let k = kanata.lock();
+            (
+                k.intercept_kb_hwids.clone(),
+                k.intercept_kb_hwids_exclude.clone(),
+            )
+        };
+
+        let mut kbd_in = KbdIn::new_filtered(
+            keyboards_to_intercept_hwids,
+            keyboards_to_intercept_hwids_exclude,
+        )
+        .map_err(|e| anyhow!("failed to open kanata-kbdflt input device: {e}"))?;
 
         loop {
             let sourced = kbd_in
