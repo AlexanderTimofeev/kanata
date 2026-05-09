@@ -750,6 +750,14 @@ fn input_reader_thread(
 
 #[cfg(all(not(feature = "simulated_output"), not(feature = "passthru_ahk")))]
 pub struct KbdOut {
+    /// The driver session that most recently produced an input event.
+    ///
+    /// NOTE: Using a global preferred session can lead to theoretical race conditions
+    /// where output is routed to the wrong device if multiple keyboards are used
+    /// simultaneously. However, Windows kbdclass.sys aggregates input state
+    /// globally, so in practice this does not lead to stuck keys or broken logic
+    /// in standard user scenarios. Explicit per-key session tracking was considered
+    /// but deferred to keep the backend simple and maintainable.
     preferred_session: Option<Weak<KmdfSession>>,
 }
 
@@ -908,6 +916,9 @@ impl KbdOut {
                 })
             },
         };
-        unsafe { SendInput(1, &mut input as LPINPUT, mem::size_of::<INPUT>() as _) };
+        let res = unsafe { SendInput(1, &mut input as LPINPUT, mem::size_of::<INPUT>() as _) };
+        if res == 0 {
+            log::warn!("SendInput for mouse event failed: {}", std::io::Error::last_os_error());
+        }
     }
 }
