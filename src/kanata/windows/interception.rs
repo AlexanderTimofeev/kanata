@@ -5,9 +5,9 @@ use std::sync::mpsc::SyncSender as Sender;
 
 use super::PRESSED_KEYS;
 use crate::kanata::*;
-use crate::oskbd::KeyValue;
 #[cfg(feature = "kmdf_driver")]
 use crate::oskbd::KbdIn;
+use crate::oskbd::KeyValue;
 
 #[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 use kanata_interception as ic;
@@ -19,15 +19,20 @@ impl Kanata {
     pub fn event_loop_inner(kanata: Arc<Mutex<Self>>, tx: Sender<KeyEvent>) -> Result<()> {
         let allow_hardware_repeat = kanata.lock().allow_hardware_repeat;
 
-        let mut kbd_in = KbdIn::new()
-            .map_err(|e| anyhow!("failed to open kanata-kbdflt input device: {e}"))?;
+        let mut kbd_in =
+            KbdIn::new().map_err(|e| anyhow!("failed to open kanata-kbdflt input device: {e}"))?;
 
         loop {
-            let sourced = kbd_in.read_sourced().map_err(|e| anyhow!("failed read: {e}"))?;
+            let sourced = kbd_in
+                .read_sourced()
+                .map_err(|e| anyhow!("failed read: {e}"))?;
             let in_event = sourced.event;
 
             // Prefer injecting through the same raw PDO session that produced the event.
-            kanata.lock().kbd_out.set_preferred_session(&sourced.session);
+            kanata
+                .lock()
+                .kbd_out
+                .set_preferred_session(&sourced.session);
 
             let mut key_event = match KeyEvent::try_from(in_event) {
                 Ok(event) => event,

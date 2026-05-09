@@ -19,15 +19,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_IO_PENDING, HANDLE, INVALID_HANDLE_VALUE,
-};
-use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
     SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
     SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
 };
+use windows_sys::Win32::Foundation::{CloseHandle, ERROR_IO_PENDING, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
     OPEN_EXISTING,
@@ -109,14 +107,20 @@ impl std::fmt::Display for InputEvent {
 impl InputEvent {
     pub fn from_oscode(code: OsCode, val: KeyValue) -> Result<Self, io::Error> {
         let sc = osc_to_u16(code).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("no scancode for {code:?}"))
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("no scancode for {code:?}"),
+            )
         })?;
 
         let mut flags: u16 = match val {
             KeyValue::Press | KeyValue::Repeat => KANATA_KEY_MAKE,
             KeyValue::Release => KANATA_KEY_BREAK,
             KeyValue::Tap | KeyValue::WakeUp => {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("invalid KeyValue for injection: {val:?}")));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid KeyValue for injection: {val:?}"),
+                ));
             }
         };
 
@@ -249,6 +253,7 @@ fn enumerate_driver_interface_paths() -> anyhow::Result<Vec<Vec<u16>>> {
         }
 
         let mut required = 0u32;
+        #[allow(clippy::unnecessary_mut_passed)]
         unsafe {
             SetupDiGetDeviceInterfaceDetailW(
                 dev_info,
@@ -271,6 +276,7 @@ fn enumerate_driver_interface_paths() -> anyhow::Result<Vec<Vec<u16>>> {
             (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
         }
 
+        #[allow(clippy::unnecessary_mut_passed)]
         let ok = unsafe {
             SetupDiGetDeviceInterfaceDetailW(
                 dev_info,
@@ -307,42 +313,6 @@ fn enumerate_driver_interface_paths() -> anyhow::Result<Vec<Vec<u16>>> {
     }
 
     Ok(paths)
-}
-
-fn try_open_driver_interface() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
-    let mut last_err = None;
-
-    for path in enumerate_driver_interface_paths()? {
-        match open_driver_path(path.as_ptr()) {
-            Ok(handle) => return Ok((handle, path)),
-            Err(e) => last_err = Some(e),
-        }
-    }
-
-    anyhow::bail!(
-        "all present kanata-kbdflt device interfaces failed to open; last error: {}",
-        last_err
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    );
-}
-
-fn try_open_driver() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
-    try_open_driver_interface()
-}
-
-fn open_driver_with_retry() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
-    let mut delay = Duration::from_millis(100);
-    loop {
-        match try_open_driver() {
-            Ok(h) => return Ok(h),
-            Err(e) => {
-                log::warn!("kanata-kbdflt: open failed ({e}), retry in {delay:?}");
-                std::thread::sleep(delay);
-                delay = (delay * 2).min(Duration::from_secs(5));
-            }
-        }
-    }
 }
 
 static KMDF_SESSIONS: Lazy<SessionRegistry> = Lazy::new(SessionRegistry::default);
@@ -391,7 +361,6 @@ impl Drop for OwnedEvent {
 
 pub(crate) struct KmdfSession {
     handle: OwnedHandle,
-    path: Vec<u16>,
     label: String,
     inject_lock: Mutex<()>,
 }
@@ -402,7 +371,6 @@ impl KmdfSession {
         let label = path_to_string(&path);
         Ok(Self {
             handle,
-            path,
             label,
             inject_lock: Mutex::new(()),
         })
@@ -447,7 +415,7 @@ impl KmdfSession {
             return Err(err);
         }
 
-        let ok = unsafe { GetOverlappedResult(self.raw(), &mut overlapped, &mut returned, 1) };
+        let ok = unsafe { GetOverlappedResult(self.raw(), &overlapped, &mut returned, 1) };
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -504,7 +472,6 @@ impl KmdfSession {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // KbdIn — used by Kanata's read loop
 // ---------------------------------------------------------------------------
@@ -545,9 +512,9 @@ impl KbdIn {
             return Ok(event);
         }
 
-        self.rx.recv().map_err(|e| {
-            anyhow::anyhow!("kanata-kbdflt: all input reader threads stopped: {e}")
-        })
+        self.rx
+            .recv()
+            .map_err(|e| anyhow::anyhow!("kanata-kbdflt: all input reader threads stopped: {e}"))
     }
 
     pub fn read(&mut self) -> anyhow::Result<InputEvent> {
@@ -719,9 +686,7 @@ impl KbdOut {
 
     pub fn write(&mut self, event: InputEvent) -> Result<(), io::Error> {
         let session = self.choose_session()?;
-        session
-            .inject_events(&[event])
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        session.inject_events(&[event]).map_err(io::Error::other)
     }
 
     pub fn write_key(&mut self, key: OsCode, value: KeyValue) -> Result<(), io::Error> {

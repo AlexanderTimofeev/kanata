@@ -134,10 +134,16 @@ type HashMap<K, V> = rustc_hash::FxHashMap<K, V>;
 /// State of pressed keys on the physical keyboard.
 ///
 /// Notably this is not what keys kanata is outputting as pressed.
-#[cfg(not(all(target_os = "windows", not(any(feature = "interception_driver", feature = "kmdf_driver")))))]
+#[cfg(not(all(
+    target_os = "windows",
+    not(any(feature = "interception_driver", feature = "kmdf_driver"))
+)))]
 pub(crate) static PRESSED_KEYS: Lazy<Mutex<HashSet<OsCode>>> =
     Lazy::new(|| Mutex::new(HashSet::default()));
-#[cfg(all(target_os = "windows", not(any(feature = "interception_driver", feature = "kmdf_driver"))))]
+#[cfg(all(
+    target_os = "windows",
+    not(any(feature = "interception_driver", feature = "kmdf_driver"))
+))]
 pub(crate) static PRESSED_KEYS: Lazy<Mutex<HashMap<OsCode, web_time::Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::default()));
 
@@ -2239,9 +2245,15 @@ impl Kanata {
                         These keys refer to defsrc input, meaning BEFORE kanata remaps keys."
             );
 
-            #[cfg(all(not(any(feature = "interception_driver", feature = "kmdf_driver")), target_os = "windows"))]
+            #[cfg(all(
+                not(any(feature = "interception_driver", feature = "kmdf_driver")),
+                target_os = "windows"
+            ))]
             let mut idle_clear_happened = false;
-            #[cfg(all(not(any(feature = "interception_driver", feature = "kmdf_driver")), target_os = "windows"))]
+            #[cfg(all(
+                not(any(feature = "interception_driver", feature = "kmdf_driver")),
+                target_os = "windows"
+            ))]
             let mut last_input_time = web_time::Instant::now();
 
             let mut events = Vec::new();
@@ -2269,7 +2281,10 @@ impl Kanata {
                                 .expect("subtract 1ms from current time");
 
                             #[cfg(all(
-                                not(any(feature = "interception_driver", feature = "kmdf_driver")),
+                                not(any(
+                                    feature = "interception_driver",
+                                    feature = "kmdf_driver"
+                                )),
                                 target_os = "windows"
                             ))]
                             clear_states_from_inactivity(
@@ -2305,14 +2320,20 @@ impl Kanata {
                                 break e;
                             }
                             #[cfg(all(
-                                not(any(feature = "interception_driver", feature = "kmdf_driver")),
+                                not(any(
+                                    feature = "interception_driver",
+                                    feature = "kmdf_driver"
+                                )),
                                 target_os = "windows"
                             ))]
                             {
                                 last_input_time = now;
                             }
                             #[cfg(all(
-                                not(any(feature = "interception_driver", feature = "kmdf_driver")),
+                                not(any(
+                                    feature = "interception_driver",
+                                    feature = "kmdf_driver"
+                                )),
                                 target_os = "windows"
                             ))]
                             {
@@ -2374,14 +2395,20 @@ impl Kanata {
                                 break e;
                             }
                             #[cfg(all(
-                                not(any(feature = "interception_driver", feature = "kmdf_driver")),
+                                not(any(
+                                    feature = "interception_driver",
+                                    feature = "kmdf_driver"
+                                )),
                                 target_os = "windows"
                             ))]
                             {
                                 last_input_time = web_time::Instant::now();
                             }
                             #[cfg(all(
-                                not(any(feature = "interception_driver", feature = "kmdf_driver")),
+                                not(any(
+                                    feature = "interception_driver",
+                                    feature = "kmdf_driver"
+                                )),
                                 target_os = "windows"
                             ))]
                             {
@@ -2425,7 +2452,10 @@ impl Kanata {
                             );
 
                             #[cfg(all(
-                                not(any(feature = "interception_driver", feature = "kmdf_driver")),
+                                not(any(
+                                    feature = "interception_driver",
+                                    feature = "kmdf_driver"
+                                )),
                                 target_os = "windows"
                             ))]
                             clear_states_from_inactivity(
@@ -2606,18 +2636,30 @@ fn apply_speed_modifiers() {
 /// Clean kanata's state without exiting
 pub fn clean_state(kanata: &Arc<Mutex<Kanata>>, tick: u128) -> Result<()> {
     let mut k = kanata.lock();
-    #[cfg(all(not(any(feature = "interception_driver", feature = "kmdf_driver")), target_os = "windows"))]
+    #[cfg(all(
+        not(any(feature = "interception_driver", feature = "kmdf_driver")),
+        target_os = "windows"
+    ))]
     let layout = k.layout.bm();
-    #[cfg(all(not(any(feature = "interception_driver", feature = "kmdf_driver")), target_os = "windows"))]
+    #[cfg(all(
+        not(any(feature = "interception_driver", feature = "kmdf_driver")),
+        target_os = "windows"
+    ))]
     release_normalkey_states(layout);
     k.tick_ms(tick, &None)?;
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let mut k_pressed = PRESSED_KEYS.lock();
         for key_os in k_pressed.clone() {
-            #[cfg(not(all(target_os = "windows", not(any(feature = "interception_driver", feature = "kmdf_driver")))))]
+            #[cfg(not(all(
+                target_os = "windows",
+                not(any(feature = "interception_driver", feature = "kmdf_driver"))
+            )))]
             k.kbd_out.release_key(key_os)?;
-            #[cfg(all(target_os = "windows", not(any(feature = "interception_driver", feature = "kmdf_driver"))))]
+            #[cfg(all(
+                target_os = "windows",
+                not(any(feature = "interception_driver", feature = "kmdf_driver"))
+            ))]
             k.kbd_out.release_key(key_os.0)?;
         }
         k_pressed.clear();
@@ -2759,7 +2801,10 @@ fn states_has_coord<T>(states: &[State<T>], x: u8, y: u16) -> bool {
     })
 }
 
-#[cfg(all(not(any(feature = "interception_driver", feature = "kmdf_driver")), target_os = "windows"))]
+#[cfg(all(
+    not(any(feature = "interception_driver", feature = "kmdf_driver")),
+    target_os = "windows"
+))]
 fn release_normalkey_states<'a, const C: usize, const R: usize, T>(layout: &mut Layout<'a, C, R, T>)
 where
     T: 'a + std::fmt::Debug + Copy,
