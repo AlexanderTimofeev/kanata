@@ -180,8 +180,6 @@ impl TryFrom<crate::oskbd::KeyEvent> for InputEvent {
 // Driver I/O
 // ---------------------------------------------------------------------------
 
-// Stale named path \\.\KanataKeyboard removed; use interface enumeration instead.
-
 const GUID_DEVINTERFACE_KBFILTER: windows_sys::core::GUID = windows_sys::core::GUID {
     data1: 0x3fb7299d,
     data2: 0x6847,
