@@ -19,7 +19,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_IO_PENDING, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
@@ -27,9 +29,15 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING,
 };
-use windows_sys::Win32::System::IO::DeviceIoControl;
+use windows_sys::Win32::System::IO::{DeviceIoControl, GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::Threading::CreateEventW;
+
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
+use std::sync::{Arc, Weak};
 
 use crate::kanata::CalculatedMouseMove;
 use crate::oskbd::KeyValue;
@@ -203,10 +211,10 @@ fn open_driver_path(path: *const u16) -> anyhow::Result<OwnedHandle> {
         CreateFileW(
             path,
             GENERIC_READ | GENERIC_WRITE,
-            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
             ptr::null(),
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
             0,
         )
     };
@@ -367,45 +375,127 @@ fn open_driver_with_retry() -> anyhow::Result<(OwnedHandle, Vec<u16>)> {
     }
 }
 
-struct KmdfHandle {
-    handle: OwnedHandle,
-    path: Vec<u16>,
+static KMDF_SESSIONS: Lazy<SessionRegistry> = Lazy::new(SessionRegistry::default);
+
+#[derive(Default)]
+struct SessionRegistry {
+    sessions: Mutex<Vec<Weak<KmdfSession>>>,
 }
 
-impl KmdfHandle {
-    fn open() -> anyhow::Result<Self> {
-        let (handle, path) = open_driver_with_retry()?;
-        Ok(Self { handle, path })
+impl SessionRegistry {
+    fn register(&self, session: &Arc<KmdfSession>) {
+        self.sessions.lock().push(Arc::downgrade(session));
+    }
+
+    fn pick(&self) -> Option<Arc<KmdfSession>> {
+        let mut sessions = self.sessions.lock();
+        sessions.retain(|s| s.strong_count() > 0);
+        sessions.iter().find_map(|s| s.upgrade())
+    }
+}
+
+struct OwnedEvent(HANDLE);
+
+impl OwnedEvent {
+    fn new() -> io::Result<Self> {
+        let h = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+        if h == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Self(h))
+        }
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.0
+    }
+}
+
+impl Drop for OwnedEvent {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+pub(crate) struct KmdfSession {
+    handle: OwnedHandle,
+    path: Vec<u16>,
+    label: String,
+    inject_lock: Mutex<()>,
+}
+
+impl KmdfSession {
+    fn open(path: Vec<u16>) -> anyhow::Result<Self> {
+        let handle = open_driver_path(path.as_ptr())?;
+        let label = path_to_string(&path);
+        Ok(Self {
+            handle,
+            path,
+            label,
+            inject_lock: Mutex::new(()),
+        })
     }
 
     fn raw(&self) -> isize {
         self.handle.as_raw_handle() as isize
     }
 
-    fn read_events(&self) -> anyhow::Result<Vec<InputEvent>> {
-        const CAP: usize = 32;
-        let mut buf = [KanataWireEvent::default(); CAP];
-        let mut returned: u32 = 0;
+    fn ioctl_overlapped(
+        &self,
+        code: u32,
+        in_buf: *const core::ffi::c_void,
+        in_len: u32,
+        out_buf: *mut core::ffi::c_void,
+        out_len: u32,
+    ) -> io::Result<u32> {
+        let event = OwnedEvent::new()?;
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.hEvent = event.raw();
 
+        let mut returned: u32 = 0;
         let ok = unsafe {
             DeviceIoControl(
                 self.raw(),
-                IOCTL_KANATA_READ_EVENTS,
-                ptr::null(),
-                0,
-                buf.as_mut_ptr() as *mut _,
-                (size_of::<KanataWireEvent>() * CAP) as u32,
+                code,
+                in_buf as *mut _,
+                in_len,
+                out_buf,
+                out_len,
                 &mut returned,
-                ptr::null_mut(),
+                &mut overlapped,
             )
         };
-        if ok == 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(170) {
-                anyhow::bail!("READ_EVENTS_BUSY: {err}");
-            }
-            anyhow::bail!("READ_EVENTS: {err}");
+
+        if ok != 0 {
+            return Ok(returned);
         }
+
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+            return Err(err);
+        }
+
+        let ok = unsafe { GetOverlappedResult(self.raw(), &mut overlapped, &mut returned, 1) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(returned)
+    }
+
+    fn read_events(&self) -> anyhow::Result<Vec<InputEvent>> {
+        const CAP: usize = 32;
+        let mut buf = [KanataWireEvent::default(); CAP];
+
+        let returned = self.ioctl_overlapped(
+            IOCTL_KANATA_READ_EVENTS,
+            ptr::null(),
+            0,
+            buf.as_mut_ptr() as *mut _,
+            (size_of::<KanataWireEvent>() * CAP) as u32,
+        )?;
 
         let count = returned as usize / size_of::<KanataWireEvent>();
         Ok(buf[..count]
@@ -421,6 +511,8 @@ impl KmdfHandle {
         if events.is_empty() {
             return Ok(());
         }
+
+        let _guard = self.inject_lock.lock();
         let wire: Vec<KanataWireEvent> = events
             .iter()
             .map(|e| KanataWireEvent {
@@ -430,44 +522,37 @@ impl KmdfHandle {
             })
             .collect();
 
-        let mut returned: u32 = 0;
-        let ok = unsafe {
-            DeviceIoControl(
-                self.raw(),
-                IOCTL_KANATA_INJECT_EVENTS,
-                wire.as_ptr() as *const _,
-                (size_of::<KanataWireEvent>() * wire.len()) as u32,
-                ptr::null_mut(),
-                0,
-                &mut returned,
-                ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            anyhow::bail!("INJECT_EVENTS: {}", io::Error::last_os_error());
-        }
+        self.ioctl_overlapped(
+            IOCTL_KANATA_INJECT_EVENTS,
+            wire.as_ptr() as *const _,
+            (size_of::<KanataWireEvent>() * wire.len()) as u32,
+            ptr::null_mut(),
+            0,
+        )?;
+
         Ok(())
     }
 }
 
-fn is_read_events_busy(err: &anyhow::Error) -> bool {
-    err.to_string().contains("READ_EVENTS_BUSY")
-}
 
 // ---------------------------------------------------------------------------
 // KbdIn — used by Kanata's read loop
 // ---------------------------------------------------------------------------
 
+pub(crate) struct SourcedInputEvent {
+    pub event: InputEvent,
+    pub session: Arc<KmdfSession>,
+}
+
 pub struct KbdIn {
-    rx: Receiver<InputEvent>,
-    pending: VecDeque<InputEvent>,
+    rx: Receiver<SourcedInputEvent>,
+    pending: VecDeque<SourcedInputEvent>,
     _manager: JoinHandle<()>,
 }
 
 #[derive(Debug)]
 enum ReaderExit {
     Stopped { label: String },
-    Busy { label: String },
 }
 
 impl KbdIn {
@@ -485,7 +570,7 @@ impl KbdIn {
     }
 
     /// Blocking read; returns one event at a time from any attached keyboard stack.
-    pub fn read(&mut self) -> anyhow::Result<InputEvent> {
+    pub(crate) fn read_sourced(&mut self) -> anyhow::Result<SourcedInputEvent> {
         if let Some(event) = self.pending.pop_front() {
             return Ok(event);
         }
@@ -494,12 +579,15 @@ impl KbdIn {
             anyhow::anyhow!("kanata-kbdflt: all input reader threads stopped: {e}")
         })
     }
+
+    pub fn read(&mut self) -> anyhow::Result<InputEvent> {
+        self.read_sourced().map(|s| s.event)
+    }
 }
 
-fn input_interface_manager(event_tx: Sender<InputEvent>) {
+fn input_interface_manager(event_tx: Sender<SourcedInputEvent>) {
     let (exit_tx, exit_rx) = mpsc::channel::<ReaderExit>();
     let mut active = HashSet::<String>::new();
-    let mut busy = HashSet::<String>::new();
     let mut first_success = false;
 
     loop {
@@ -509,13 +597,6 @@ fn input_interface_manager(event_tx: Sender<InputEvent>) {
                     active.remove(&label);
                     log::warn!(
                         "kanata-kbdflt: input reader stopped for {label}; will rescan interfaces"
-                    );
-                }
-                ReaderExit::Busy { label } => {
-                    active.remove(&label);
-                    busy.insert(label.clone());
-                    log::warn!(
-                        "kanata-kbdflt: read busy on {label}; disabling this input reader until device list changes"
                     );
                 }
             }
@@ -542,21 +623,21 @@ fn input_interface_manager(event_tx: Sender<InputEvent>) {
         // If an interface disappeared, forget its old state. A replug usually creates a new
         // device path, and this also lets a formerly busy path become eligible after removal.
         active.retain(|label| present.contains(label));
-        busy.retain(|label| present.contains(label));
 
         let mut opened_this_scan = 0usize;
         for path in paths {
             let label = path_to_string(&path);
-            if active.contains(&label) || busy.contains(&label) {
+            if active.contains(&label) {
                 continue;
             }
 
-            match open_driver_path(path.as_ptr()) {
-                Ok(handle) => {
-                    let drv = KmdfHandle { handle, path };
+            match KmdfSession::open(path) {
+                Ok(session) => {
+                    let session = Arc::new(session);
+                    KMDF_SESSIONS.register(&session);
                     active.insert(label.clone());
                     opened_this_scan += 1;
-                    spawn_input_reader(drv, label, event_tx.clone(), exit_tx.clone());
+                    spawn_input_reader(session, event_tx.clone(), exit_tx.clone());
                 }
                 Err(e) => {
                     log::warn!("kanata-kbdflt: open input interface {label} failed: {e}");
@@ -567,17 +648,13 @@ fn input_interface_manager(event_tx: Sender<InputEvent>) {
         if opened_this_scan > 0 {
             first_success = true;
             log::info!(
-                "kanata-kbdflt: opened {opened_this_scan} new input interface(s); active={}, busy={}",
-                active.len(),
-                busy.len()
+                "kanata-kbdflt: opened {opened_this_scan} new input interface(s); active={}",
+                active.len()
             );
         }
 
-        if active.is_empty() && !busy.is_empty() {
-            log::warn!(
-                "kanata-kbdflt: no active input readers; {} interface(s) are busy/disabled",
-                busy.len()
-            );
+        if active.is_empty() {
+            log::warn!("kanata-kbdflt: no active input readers");
         }
 
         // Polling is deliberate: SetupDi enumeration is cheap here, and this avoids needing
@@ -587,44 +664,45 @@ fn input_interface_manager(event_tx: Sender<InputEvent>) {
 }
 
 fn spawn_input_reader(
-    drv: KmdfHandle,
-    label: String,
-    event_tx: Sender<InputEvent>,
+    session: Arc<KmdfSession>,
+    event_tx: Sender<SourcedInputEvent>,
     exit_tx: Sender<ReaderExit>,
 ) {
-    std::thread::spawn(move || input_reader_thread(drv, label, event_tx, exit_tx));
+    std::thread::spawn(move || input_reader_thread(session, event_tx, exit_tx));
 }
 
 fn input_reader_thread(
-    drv: KmdfHandle,
-    label: String,
-    event_tx: Sender<InputEvent>,
+    session: Arc<KmdfSession>,
+    event_tx: Sender<SourcedInputEvent>,
     exit_tx: Sender<ReaderExit>,
 ) {
-    log::info!("kanata-kbdflt: input reader started for {label}");
+    log::info!("kanata-kbdflt: input reader started for {}", session.label);
 
     loop {
-        match drv.read_events() {
+        match session.read_events() {
             Ok(events) => {
                 for event in events {
-                    if event_tx.send(event).is_err() {
+                    let sourced = SourcedInputEvent {
+                        event,
+                        session: session.clone(),
+                    };
+                    if event_tx.send(sourced).is_err() {
                         log::info!(
-                            "kanata-kbdflt: input reader exiting for {label}; receiver closed"
+                            "kanata-kbdflt: input reader exiting for {}; receiver closed",
+                            session.label
                         );
                         return;
                     }
                 }
             }
             Err(e) => {
-                if is_read_events_busy(&e) {
-                    let _ = exit_tx.send(ReaderExit::Busy { label });
-                    return;
-                }
-
                 log::warn!(
-                    "kanata-kbdflt: read error on {label} ({e}); reader stopped, manager will rescan"
+                    "kanata-kbdflt: read error on {} ({e}); reader stopped, manager will rescan",
+                    session.label
                 );
-                let _ = exit_tx.send(ReaderExit::Stopped { label });
+                let _ = exit_tx.send(ReaderExit::Stopped {
+                    label: session.label.clone(),
+                });
                 return;
             }
         }
@@ -637,30 +715,43 @@ fn input_reader_thread(
 
 #[cfg(all(not(feature = "simulated_output"), not(feature = "passthru_ahk")))]
 pub struct KbdOut {
-    drv: KmdfHandle,
+    preferred_session: Option<Weak<KmdfSession>>,
 }
 
 #[cfg(all(not(feature = "simulated_output"), not(feature = "passthru_ahk")))]
 impl KbdOut {
     pub fn new() -> Result<Self, io::Error> {
-        log::info!("kanata-kbdflt: opening \\.\\ KanataKeyboard for output");
-        KmdfHandle::open()
-            .map(|drv| Self { drv })
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        Ok(Self {
+            preferred_session: None,
+        })
+    }
+
+    pub(crate) fn set_preferred_session(&mut self, session: &Arc<KmdfSession>) {
+        self.preferred_session = Some(Arc::downgrade(session));
+    }
+
+    fn choose_session(&mut self) -> Result<Arc<KmdfSession>, io::Error> {
+        if let Some(session) = self
+            .preferred_session
+            .as_ref()
+            .and_then(|weak| weak.upgrade())
+        {
+            return Ok(session);
+        }
+
+        KMDF_SESSIONS.pick().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotConnected,
+                "kanata-kbdflt: no active driver session available for injection",
+            )
+        })
     }
 
     pub fn write(&mut self, event: InputEvent) -> Result<(), io::Error> {
-        match self.drv.inject_events(&[event]) {
-            Ok(()) => Ok(()),
-            Err(first_err) => {
-                log::warn!("kanata-kbdflt: inject error ({first_err}), reconnecting…");
-                self.drv = KmdfHandle::open()
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-                self.drv
-                    .inject_events(&[event])
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
-            }
-        }
+        let session = self.choose_session()?;
+        session
+            .inject_events(&[event])
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 
     pub fn write_key(&mut self, key: OsCode, value: KeyValue) -> Result<(), io::Error> {

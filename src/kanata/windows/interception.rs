@@ -23,12 +23,17 @@ impl Kanata {
             .map_err(|e| anyhow!("failed to open kanata-kbdflt input device: {e}"))?;
 
         loop {
-            let in_event = kbd_in.read().map_err(|e| anyhow!("failed read: {e}"))?;
+            let sourced = kbd_in.read_sourced().map_err(|e| anyhow!("failed read: {e}"))?;
+            let in_event = sourced.event;
+
+            // Prefer injecting through the same raw PDO session that produced the event.
+            kanata.lock().kbd_out.set_preferred_session(&sourced.session);
+
             let mut key_event = match KeyEvent::try_from(in_event) {
                 Ok(event) => event,
                 Err(e) => {
                     log::warn!("unknown keyboard event from driver, passing through: {e:?}");
-                    kanata.lock().kbd_out.write(in_event)?;
+                    sourced.session.inject_events(&[in_event])?;
                     continue;
                 }
             };
@@ -36,7 +41,8 @@ impl Kanata {
             check_for_exit(&key_event);
 
             if !MAPPED_KEYS.lock().contains(&key_event.code) {
-                kanata.lock().kbd_out.write(in_event)?;
+                // This guarantees pass-through uses the exact session that captured the key.
+                sourced.session.inject_events(&[in_event])?;
                 continue;
             }
 
