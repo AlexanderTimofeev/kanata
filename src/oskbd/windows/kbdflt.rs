@@ -72,14 +72,6 @@ const IOCTL_KANATA_INJECT_EVENTS: u32 = ctl_code(
     METHOD_BUFFERED,
     FILE_WRITE_DATA_ACC,
 );
-const IOCTL_KANATA_GET_VERSION: u32 = ctl_code(
-    KANATA_IOCTL_BASE,
-    0x805,
-    METHOD_BUFFERED,
-    FILE_READ_DATA_ACC,
-);
-
-const KANATA_EXPECTED_DRIVER_VERSION: u32 = 1;
 
 const KANATA_KEY_MAKE: u16 = 0x0000;
 const KANATA_KEY_BREAK: u16 = 0x0001;
@@ -407,39 +399,13 @@ impl KmdfSession {
     pub(crate) fn open(path: Vec<u16>) -> anyhow::Result<Self> {
         let handle = open_driver_path(path.as_ptr())?;
         let label = path_to_string(&path);
-        let session = Self {
+        Ok(Self {
             handle,
             label,
             inject_lock: Mutex::new(()),
-        };
-
-        let version = session.get_version().map_err(|e| {
-            anyhow::anyhow!("failed to query driver version: {e}")
-        })?;
-
-        if version != KANATA_EXPECTED_DRIVER_VERSION {
-            anyhow::bail!(
-                "driver version mismatch for {}: expected {}, got {}",
-                session.label,
-                KANATA_EXPECTED_DRIVER_VERSION,
-                version
-            );
-        }
-
-        Ok(session)
+        })
     }
 
-    pub(crate) fn get_version(&self) -> io::Result<u32> {
-        let mut version: u32 = 0;
-        self.ioctl_overlapped(
-            IOCTL_KANATA_GET_VERSION,
-            ptr::null(),
-            0,
-            &mut version as *mut _ as *mut _,
-            size_of::<u32>() as u32,
-        )?;
-        Ok(version)
-    }
 
     fn raw(&self) -> isize {
         self.handle.as_raw_handle() as isize
