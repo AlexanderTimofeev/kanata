@@ -124,6 +124,20 @@ pub fn u16_to_osc(input: u16) -> Option<OsCode> {
             // ScanCode::SBCSChar = 0x77,
             _ => return None,
         }
+    } else if input & 0xFF00 == 0xE100 {
+        // E1-prefixed sequence. The only standard key that uses the E1 prefix
+        // is Pause/Break, whose make sequence is `E1 1D 45`. Both parts arrive
+        // with the KEY_E1 flag set in KEYBOARD_INPUT_DATA, so map them to
+        // KEY_PAUSE here. This MUST be handled separately from the E0 branch
+        // below: without it, E1 `0x1D` collides with E0 `0x1D` (Right Ctrl),
+        // which silently swallows the Pause sequence (Right Ctrl is usually a
+        // mapped key, so it gets routed through the engine instead of passed
+        // through, and Windows never sees a valid Pause sequence).
+        match input & 0xFF {
+            0x1D => OsCode::KEY_PAUSE, // E1 1D
+            0x45 => OsCode::KEY_PAUSE, // trailing 45 of the Pause make sequence
+            _ => return None,
+        }
     } else {
         match input & 0xFF {
             0x10 => OsCode::KEY_PREVIOUSSONG,

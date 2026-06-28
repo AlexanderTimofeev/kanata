@@ -81,6 +81,7 @@ use kanata_parser::cfg::list_actions::*;
 use kanata_parser::cfg::*;
 use kanata_parser::custom_action::*;
 pub use kanata_parser::keys::*;
+#[cfg(all(target_os = "windows", any(feature = "interception_driver", feature = "kmdf_driver")))]
 use kanata_parser::cfg::HWID_ARR_SZ;
 use kanata_tcp_protocol::ServerMessage;
 
