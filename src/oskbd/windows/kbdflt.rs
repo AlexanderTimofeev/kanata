@@ -682,6 +682,7 @@ fn input_interface_manager(
 ) {
     let (exit_tx, exit_rx) = mpsc::channel::<ReaderExit>();
     let mut active = HashSet::<String>::new();
+    let mut warned_failed = HashSet::<String>::new();
     let mut first_success = false;
 
     loop {
@@ -721,6 +722,7 @@ fn input_interface_manager(
         // If an interface disappeared, forget its old state. A replug usually creates a new
         // device path, and this also lets a formerly busy path become eligible after removal.
         active.retain(|label| present.contains(label));
+        warned_failed.retain(|label| present.contains(label));
 
         let mut opened_this_scan = 0usize;
         for path in paths {
@@ -745,7 +747,13 @@ fn input_interface_manager(
                     spawn_input_reader(session, event_tx.clone(), exit_tx.clone(), shutdown.clone());
                 }
                 Err(e) => {
-                    log::warn!("kanata-kbdflt: open input interface {label} failed: {e}");
+                    if warned_failed.insert(label.clone()) {
+                        log::warn!("kanata-kbdflt: open input interface {label} failed: {e}");
+                    } else {
+                        log::debug!(
+                            "kanata-kbdflt: open input interface {label} still failing: {e}"
+                        );
+                    }
                 }
             }
         }
