@@ -15,14 +15,30 @@ use encode_unicode::CharExt;
 #[cfg(not(feature = "simulated_input"))]
 use crate::oskbd::KeyValue;
 
-#[cfg(all(not(feature = "interception_driver"), not(feature = "simulated_input")))]
+#[cfg(all(
+    not(feature = "interception_driver"),
+    not(feature = "kmdf_driver"),
+    not(feature = "simulated_input")
+))]
 mod llhook; // contains KbdOut any(not(feature = "simulated_output"), not(feature = "passthru_ahk"))
-#[cfg(all(not(feature = "interception_driver"), not(feature = "simulated_input")))]
+#[cfg(all(
+    not(feature = "interception_driver"),
+    not(feature = "kmdf_driver"),
+    not(feature = "simulated_input")
+))]
 pub use llhook::*;
 
-#[cfg(all(not(feature = "interception_driver"), feature = "simulated_input"))]
+#[cfg(all(
+    not(feature = "interception_driver"),
+    not(feature = "kmdf_driver"),
+    feature = "simulated_input"
+))]
 mod exthook_os;
-#[cfg(all(not(feature = "interception_driver"), feature = "simulated_input"))]
+#[cfg(all(
+    not(feature = "interception_driver"),
+    not(feature = "kmdf_driver"),
+    feature = "simulated_input"
+))]
 pub use exthook_os::*;
 
 mod scancode_to_usvk;
@@ -37,6 +53,11 @@ mod interception_convert;
 pub use self::interception::*;
 #[cfg(feature = "interception_driver")]
 pub use interception_convert::*;
+
+#[cfg(feature = "kmdf_driver")]
+mod kbdflt;
+#[cfg(feature = "kmdf_driver")]
+pub use self::kbdflt::*;
 
 #[cfg(not(feature = "simulated_input"))]
 fn send_uc(c: char, up: bool) {

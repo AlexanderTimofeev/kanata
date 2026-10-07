@@ -1,14 +1,112 @@
 use anyhow::{Result, anyhow};
-use kanata_interception as ic;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::sync::mpsc::SyncSender as Sender;
 
 use super::PRESSED_KEYS;
 use crate::kanata::*;
+#[cfg(feature = "kmdf_driver")]
+use crate::oskbd::KbdIn;
 use crate::oskbd::KeyValue;
+
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
+use kanata_interception as ic;
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 use kanata_parser::keys::OsCode;
 
+#[cfg(feature = "kmdf_driver")]
+impl Kanata {
+    pub fn event_loop_inner(kanata: Arc<Mutex<Self>>, tx: Sender<KeyEvent>) -> Result<()> {
+        let allow_hardware_repeat = kanata.lock().allow_hardware_repeat;
+
+        let (keyboards_to_intercept_hwids, keyboards_to_intercept_hwids_exclude) = {
+            let k = kanata.lock();
+            (
+                k.intercept_kb_hwids.clone(),
+                k.intercept_kb_hwids_exclude.clone(),
+            )
+        };
+
+        let mut kbd_in = KbdIn::new_filtered(
+            keyboards_to_intercept_hwids,
+            keyboards_to_intercept_hwids_exclude,
+        )
+        .map_err(|e| anyhow!("failed to open kanata-kbdflt input device: {e}"))?;
+
+        loop {
+            let sourced = kbd_in
+                .read_sourced()
+                .map_err(|e| anyhow!("failed read: {e}"))?;
+            let in_event = sourced.event;
+
+            // Prefer injecting through the same raw PDO session that produced the event.
+            kanata
+                .lock()
+                .kbd_out
+                .set_preferred_session(&sourced.session);
+
+            let mut key_event = match KeyEvent::try_from(in_event) {
+                Ok(event) => event,
+                Err(e) => {
+                    if !e.is_fake_shift() {
+                        log::warn!("unknown keyboard event from driver, passing through: {e:?}");
+                    }
+                    sourced.session.inject_events(&[in_event])?;
+                    continue;
+                }
+            };
+
+            check_for_exit(&key_event);
+
+            if !MAPPED_KEYS.lock().contains(&key_event.code) {
+                // This guarantees pass-through uses the exact session that captured the key.
+                sourced.session.inject_events(&[in_event])?;
+                continue;
+            }
+
+            match key_event.value {
+                KeyValue::Release => {
+                    PRESSED_KEYS.lock().remove(&key_event.code);
+                }
+                KeyValue::Press => {
+                    let mut pressed_keys = PRESSED_KEYS.lock();
+                    if pressed_keys.contains(&key_event.code) {
+                        key_event.value = KeyValue::Repeat;
+                    } else {
+                        pressed_keys.insert(key_event.code);
+                    }
+                }
+                _ => {}
+            }
+
+            if key_event.value == KeyValue::Repeat && !allow_hardware_repeat {
+                continue;
+            }
+
+            tx.try_send(key_event)?;
+        }
+    }
+
+    pub fn event_loop(
+        kanata: Arc<Mutex<Self>>,
+        tx: Sender<KeyEvent>,
+        #[cfg(feature = "gui")] ui: crate::gui::system_tray_ui::SystemTrayUi,
+    ) -> Result<()> {
+        #[cfg(not(feature = "gui"))]
+        {
+            Self::event_loop_inner(kanata, tx)
+        }
+        #[cfg(feature = "gui")]
+        {
+            std::thread::spawn(move || -> Result<()> { Self::event_loop_inner(kanata, tx) });
+            let _ui = ui;
+            native_windows_gui::dispatch_thread_events();
+            Ok(())
+        }
+    }
+}
+
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 impl Kanata {
     pub fn event_loop_inner(kanata: Arc<Mutex<Self>>, tx: Sender<KeyEvent>) -> Result<()> {
         let intrcptn = ic::Interception::new().ok_or_else(|| anyhow!("interception driver should init: have you completed the interception driver installation?"))?;
@@ -130,6 +228,7 @@ impl Kanata {
             }
         }
     }
+
     pub fn event_loop(
         kanata: Arc<Mutex<Self>>,
         tx: Sender<KeyEvent>,
@@ -149,6 +248,7 @@ impl Kanata {
     }
 }
 
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 fn is_device_interceptable(
     input_dev: ic::Device,
     intrcptn: &ic::Interception,
@@ -189,6 +289,8 @@ fn is_device_interceptable(
         _ => unreachable!("excluded and allowed should be mutually exclusive"),
     }
 }
+
+#[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
 fn mouse_state_to_event(state: ic::MouseState, rolling: i16) -> Option<KeyEvent> {
     if state.contains(ic::MouseState::RIGHT_BUTTON_DOWN) {
         Some(KeyEvent::new(OsCode::BTN_RIGHT, KeyValue::Press))

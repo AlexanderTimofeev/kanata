@@ -31,6 +31,7 @@ simplelog = "0.12.0"
 [features]
 cmd = []
 interception_driver = []
+kmdf_driver = []
 gui = []
 lsp = []
 win_llhook_read_scancodes = []

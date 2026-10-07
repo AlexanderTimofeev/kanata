@@ -65,10 +65,20 @@ mod cli {
         .expect("logger can init");
 
         log::info!("kanata v{} starting", env!("CARGO_PKG_VERSION"));
-        #[cfg(all(not(feature = "interception_driver"), target_os = "windows"))]
+        #[cfg(all(
+            not(feature = "interception_driver"),
+            not(feature = "kmdf_driver"),
+            target_os = "windows"
+        ))]
         log::info!("using LLHOOK+SendInput for keyboard IO");
-        #[cfg(all(feature = "interception_driver", target_os = "windows"))]
+        #[cfg(all(
+            feature = "interception_driver",
+            not(feature = "kmdf_driver"),
+            target_os = "windows"
+        ))]
         log::info!("using the Interception driver for keyboard IO");
+        #[cfg(all(feature = "kmdf_driver", target_os = "windows"))]
+        log::info!("using the kanata-kbdflt KMDF driver for keyboard IO");
 
         #[cfg(target_os = "macos")]
         if args.macos_request_permissions {
