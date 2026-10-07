@@ -1,3 +1,6 @@
+#[cfg(all(feature = "interception_driver", feature = "kmdf_driver"))]
+compile_error!("interception_driver and kmdf_driver are mutually exclusive");
+
 use anyhow::{Error, Result, anyhow};
 use std::net::SocketAddr;
 use std::path::PathBuf;

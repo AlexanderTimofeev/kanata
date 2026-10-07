@@ -73,7 +73,7 @@ pub struct CfgMacosOptions {
 }
 
 #[cfg(any(
-    all(feature = "interception_driver", target_os = "windows"),
+    all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
     target_os = "unknown"
 ))]
 #[derive(Debug, Clone, Default)]
@@ -159,7 +159,7 @@ pub struct CfgOptions {
     pub chords_v2_min_idle: u16,
     pub tap_hold_require_prior_idle: u16,
     #[cfg(any(
-        all(target_os = "windows", feature = "interception_driver"),
+        all(target_os = "windows", any(feature = "interception_driver", feature = "kmdf_driver")),
         target_os = "linux",
         target_os = "android",
         target_os = "macos",
@@ -173,7 +173,7 @@ pub struct CfgOptions {
     #[cfg(any(target_os = "windows", target_os = "unknown"))]
     pub windows_opts: CfgWindowsOptions,
     #[cfg(any(
-        all(feature = "interception_driver", target_os = "windows"),
+        all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
         target_os = "unknown"
     ))]
     pub wintercept_opts: CfgWinterceptOptions,
@@ -208,7 +208,7 @@ impl Default for CfgOptions {
             chords_v2_min_idle: 5,
             tap_hold_require_prior_idle: 0,
             #[cfg(any(
-                all(target_os = "windows", feature = "interception_driver"),
+                all(target_os = "windows", any(feature = "interception_driver", feature = "kmdf_driver")),
                 target_os = "linux",
                 target_os = "android",
                 target_os = "macos",
@@ -220,7 +220,7 @@ impl Default for CfgOptions {
             #[cfg(any(target_os = "windows", target_os = "unknown"))]
             windows_opts: Default::default(),
             #[cfg(any(
-                all(feature = "interception_driver", target_os = "windows"),
+                all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
                 target_os = "unknown"
             ))]
             wintercept_opts: Default::default(),
@@ -511,7 +511,7 @@ pub fn parse_defcfg(expr: &[SExpr]) -> Result<CfgOptions> {
                     }
                     "windows-interception-mouse-hwid" => {
                         #[cfg(any(
-                            all(feature = "interception_driver", target_os = "windows"),
+                            all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
                             target_os = "unknown"
                         ))]
                         {
@@ -570,7 +570,7 @@ pub fn parse_defcfg(expr: &[SExpr]) -> Result<CfgOptions> {
                     }
                     "windows-interception-mouse-hwids" => {
                         #[cfg(any(
-                            all(feature = "interception_driver", target_os = "windows"),
+                            all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
                             target_os = "unknown"
                         ))]
                         {
@@ -611,7 +611,7 @@ pub fn parse_defcfg(expr: &[SExpr]) -> Result<CfgOptions> {
                     }
                     "windows-interception-mouse-hwids-exclude" => {
                         #[cfg(any(
-                            all(feature = "interception_driver", target_os = "windows"),
+                            all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
                             target_os = "unknown"
                         ))]
                         {
@@ -636,7 +636,7 @@ pub fn parse_defcfg(expr: &[SExpr]) -> Result<CfgOptions> {
                     }
                     "windows-interception-keyboard-hwids" => {
                         #[cfg(any(
-                            all(feature = "interception_driver", target_os = "windows"),
+                            all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
                             target_os = "unknown"
                         ))]
                         {
@@ -661,7 +661,7 @@ pub fn parse_defcfg(expr: &[SExpr]) -> Result<CfgOptions> {
                     }
                     "windows-interception-keyboard-hwids-exclude" => {
                         #[cfg(any(
-                            all(feature = "interception_driver", target_os = "windows"),
+                            all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
                             target_os = "unknown"
                         ))]
                         {
@@ -1086,7 +1086,7 @@ fn sexpr_to_str_or_err<'a>(expr: &'a SExpr, label: &str) -> Result<&'a str> {
 }
 
 #[cfg(any(
-    all(feature = "interception_driver", target_os = "windows"),
+    all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
     target_os = "unknown"
 ))]
 fn sexpr_to_list_or_err<'a>(expr: &'a SExpr, label: &str) -> Result<&'a [SExpr]> {
@@ -1097,7 +1097,7 @@ fn sexpr_to_list_or_err<'a>(expr: &'a SExpr, label: &str) -> Result<&'a [SExpr]>
 }
 
 #[cfg(any(
-    all(feature = "interception_driver", target_os = "windows"),
+    all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
     target_os = "unknown"
 ))]
 pub(crate) fn sexpr_to_hwids_vec(
@@ -1172,7 +1172,7 @@ pub enum WinSyncKeystateBehaviour {
 
 #[cfg(any(target_os = "windows", target_os = "unknown"))]
 #[cfg(any(
-    all(feature = "interception_driver", target_os = "windows"),
+    all(any(feature = "interception_driver", feature = "kmdf_driver"), target_os = "windows"),
     target_os = "unknown"
 ))]
 pub const HWID_ARR_SZ: usize = 1024;
