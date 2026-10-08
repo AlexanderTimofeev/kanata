@@ -418,6 +418,25 @@ fn enumerate_driver_interface_paths() -> anyhow::Result<Vec<Vec<u16>>> {
     Ok(paths)
 }
 
+// Opt-in diagnostic only, compatible with the installed legacy KMDF driver.
+// Never enable while typing credentials: this records raw key scancodes.
+static KMDF_READ_TRACE: Lazy<Option<Mutex<std::fs::File>>> = Lazy::new(|| {
+    if std::env::var("KANATA_KMDF_TRACE").ok().as_deref() != Some("1") {
+        return None;
+    }
+    let path = std::env::current_exe().ok()?.with_file_name("kanata-kmdf-trace.log");
+    let file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok()?;
+    Some(Mutex::new(file))
+});
+
+fn kmdf_read_trace(label: &str, event: &InputEvent) {
+    use std::io::Write;
+    if let Some(file) = KMDF_READ_TRACE.as_ref() {
+        let _ = writeln!(file.lock(), "{:?} session={} make_code=0x{:04X} flags=0x{:04X}",
+            std::time::SystemTime::now(), label, event.make_code, event.flags);
+    }
+}
+
 static KMDF_SESSIONS: Lazy<SessionRegistry> = Lazy::new(SessionRegistry::default);
 
 #[derive(Default)]
@@ -801,6 +820,7 @@ fn input_reader_thread(
         match session.read_events() {
             Ok(events) => {
                 for event in events {
+                    kmdf_read_trace(&session.label, &event);
                     let sourced = SourcedInputEvent {
                         event,
                         session: session.clone(),
