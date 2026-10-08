@@ -340,48 +340,20 @@ reads. They are **not** an endorsement.
 - https://www.givewell.org/
 
 
-## KMDF diagnostic build (branch `diag/kmdf-userland-trace-20261008`)
+## KMDF read diagnostics (temporary branch)
 
-This branch uses the **existing legacy KMDF driver IOCTLs**. It does not require
-updating or reinstalling the kernel driver. The trace is disabled by default.
+This branch differs from `own_driver` by **one debug log statement** in
+`input_reader_thread`. No new tracing subsystem, file I/O, protocol change,
+or input event handling changes. The existing logging setup handles the output.
 
-In Windows PowerShell (from the directory containing the newly built binary):
+With a console binary, start with the usual config and add `--debug`, then
+redirect both output streams to a log, for example in PowerShell:
 
 ```powershell
-$env:KANATA_KMDF_TRACE = "1"
-.\kanata.exe -c .\kanata.kbd
+.\kanata.exe --debug -c .\kanata.kbd *> .\kanata-debug.log
 ```
 
-Replace the executable name and config path with those from your normal setup,
-and keep your usual build features (including `kmdf_driver`). For GUI builds,
-set the environment variable **before** starting the app in the same environment,
-then run the usual executable. Restart Kanata to apply changes.
-
-When enabled, Kanata appends to `kanata-kmdf-trace.log` **next to the actual
-running EXE**, not the working directory. Ensure that directory is writable.
-Delete/rename the old log before a new test to separate sessions.
-
-Markers:
-- `READ session=...`: events delivered by the driver, including device path
-- `DISPATCH_INPUT`: event read by the Kanata interception loop
-- `UNMAPPED`, `UNRECOGNIZED`: keys immediately passed back to the driver
-- `REPEAT_DETECTED`, `REPEAT_SUPPRESSED`: duplicate key-down handling
-- `RELEASE was_pressed=false`: release without a corresponding mapped press
-- `QUEUE_SEND`, `QUEUE_ERROR`: mapped input forwarded to processing thread
-- `INJECT_BEGIN`/`INJECT_END`: output sent to the driver; includes duration
-- `INPUT_LOOP_EXIT`: fatal reader-loop exit (not silently swallowed in GUI)
-
-For a reproducible failure, record the expected and actual sequence in Notepad
-and the approximate time of the glitch. For a diagnostic run, use a short
-test phrase containing repeated spaces; compare `READ`, `QUEUE_SEND`
-and `INJECT` for relevant scan codes.
-
-**Limitations:** an IOCTL success with the legacy driver does not prove that
-kbdclass accepted all synthetic key events. A user-mode-only build cannot read
-the kernel callback's consumed count without a driver update. The trace does
-not yet capture every keyberon internal remapping decision.
-
-**Privacy:** scan codes reveal the keys you type. Do not enter passwords or
-private data while tracing. Do not share raw full-session logs publicly.
-Logging adds I/O overhead and can change timing; turn it off after testing
-by removing `KANATA_KMDF_TRACE` and restarting Kanata.
+Adjust paths and flags to match your regular invocation. For GUI builds,
+console redirection may not capture logs; use a console binary for this test.
+The debug log may include keyboard scancodes: do not type credentials while
+recording. First verify this build works normally **without** `--debug`.
