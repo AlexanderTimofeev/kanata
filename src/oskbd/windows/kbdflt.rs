@@ -78,6 +78,13 @@ const IOCTL_KANATA_INJECT_EVENTS: u32 = ctl_code(
     FILE_WRITE_DATA_ACC,
 );
 
+const IOCTL_KANATA_INJECT_EVENTS_V2: u32 = ctl_code(
+    KANATA_IOCTL_BASE,
+    0x806,
+    METHOD_BUFFERED,
+    FILE_WRITE_DATA_ACC,
+);
+
 const KANATA_KEY_MAKE: u16 = 0x0000;
 const KANATA_KEY_BREAK: u16 = 0x0001;
 const KANATA_KEY_E0: u16 = 0x0002;
@@ -586,14 +593,37 @@ impl KmdfSession {
             })
             .collect();
 
-        self.ioctl_overlapped(
-            IOCTL_KANATA_INJECT_EVENTS,
-            wire.as_ptr() as *const _,
-            (size_of::<KanataWireEvent>() * wire.len()) as u32,
-            ptr::null_mut(),
-            0,
-        )?;
-
+        // V2 ACKs the exact prefix accepted by kbdclass. Never replay
+        // a whole batch after partial acceptance: that duplicates keys.
+        let mut offset = 0usize;
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while offset < wire.len() {
+            let remaining = &wire[offset..];
+            let mut accepted: u32 = 0;
+            let returned = self.ioctl_overlapped(
+                IOCTL_KANATA_INJECT_EVENTS_V2,
+                remaining.as_ptr() as *const _,
+                (size_of::<KanataWireEvent>() * remaining.len()) as u32,
+                &mut accepted as *mut u32 as *mut _,
+                size_of::<u32>() as u32,
+            )?;
+            if returned != size_of::<u32>() as u32 || accepted as usize > remaining.len() {
+                anyhow::bail!(
+                    "kanata-kbdflt: invalid injection V2 ACK: returned={returned}, accepted={accepted}, requested={}",
+                    remaining.len()
+                );
+            }
+            offset += accepted as usize;
+            if offset < wire.len() {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "kanata-kbdflt: injection stalled after accepting {offset}/{} events (500ms deadline)",
+                        wire.len()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         Ok(())
     }
 }
