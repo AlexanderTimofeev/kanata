@@ -7,6 +7,8 @@ use super::PRESSED_KEYS;
 use crate::kanata::*;
 #[cfg(feature = "kmdf_driver")]
 use crate::oskbd::KbdIn;
+#[cfg(feature = "kmdf_driver")]
+use crate::oskbd::windows::kbdflt::kmdf_trace;
 use crate::oskbd::KeyValue;
 
 #[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
@@ -38,6 +40,7 @@ impl Kanata {
                 .read_sourced()
                 .map_err(|e| anyhow!("failed read: {e}"))?;
             let in_event = sourced.event;
+            kmdf_trace(format_args!("DISPATCH_INPUT sc=0x{:04X} flags=0x{:04X}", in_event.make_code, in_event.flags));
 
             // Prefer injecting through the same raw PDO session that produced the event.
             kanata
@@ -51,6 +54,7 @@ impl Kanata {
                     if !e.is_fake_shift() {
                         log::warn!("unknown keyboard event from driver, passing through: {e:?}");
                     }
+                    kmdf_trace(format_args!("UNRECOGNIZED passthrough sc=0x{:04X} flags=0x{:04X}", in_event.make_code, in_event.flags));
                     sourced.session.inject_events(&[in_event])?;
                     continue;
                 }
@@ -60,17 +64,20 @@ impl Kanata {
 
             if !MAPPED_KEYS.lock().contains(&key_event.code) {
                 // This guarantees pass-through uses the exact session that captured the key.
+                kmdf_trace(format_args!("UNMAPPED passthrough code={:?} value={:?}", key_event.code, key_event.value));
                 sourced.session.inject_events(&[in_event])?;
                 continue;
             }
 
             match key_event.value {
                 KeyValue::Release => {
-                    PRESSED_KEYS.lock().remove(&key_event.code);
+                    let was_pressed = PRESSED_KEYS.lock().remove(&key_event.code);
+                    kmdf_trace(format_args!("RELEASE code={:?} was_pressed={was_pressed}", key_event.code));
                 }
                 KeyValue::Press => {
                     let mut pressed_keys = PRESSED_KEYS.lock();
                     if pressed_keys.contains(&key_event.code) {
+                        kmdf_trace(format_args!("REPEAT_DETECTED code={:?}", key_event.code));
                         key_event.value = KeyValue::Repeat;
                     } else {
                         pressed_keys.insert(key_event.code);
@@ -80,10 +87,15 @@ impl Kanata {
             }
 
             if key_event.value == KeyValue::Repeat && !allow_hardware_repeat {
+                kmdf_trace(format_args!("REPEAT_SUPPRESSED code={:?}", key_event.code));
                 continue;
             }
 
-            tx.try_send(key_event)?;
+            kmdf_trace(format_args!("QUEUE_SEND code={:?} value={:?}", key_event.code, key_event.value));
+            if let Err(e) = tx.try_send(key_event) {
+                kmdf_trace(format_args!("QUEUE_ERROR {e}"));
+                return Err(e.into());
+            }
         }
     }
 
@@ -98,7 +110,12 @@ impl Kanata {
         }
         #[cfg(feature = "gui")]
         {
-            std::thread::spawn(move || -> Result<()> { Self::event_loop_inner(kanata, tx) });
+            std::thread::spawn(move || {
+                if let Err(e) = Self::event_loop_inner(kanata, tx) {
+                    kmdf_trace(format_args!("INPUT_LOOP_EXIT error={e:#}"));
+                    log::error!("kanata-kbdflt: input loop terminated: {e:#}");
+                }
+            });
             let _ui = ui;
             native_windows_gui::dispatch_thread_events();
             Ok(())
