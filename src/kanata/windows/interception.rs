@@ -98,7 +98,11 @@ impl Kanata {
         }
         #[cfg(feature = "gui")]
         {
-            std::thread::spawn(move || -> Result<()> { Self::event_loop_inner(kanata, tx) });
+            std::thread::spawn(move || {
+                if let Err(e) = Self::event_loop_inner(kanata, tx) {
+                    log::error!("kanata-kbdflt: KMDF input loop terminated: {e:#}");
+                }
+            });
             let _ui = ui;
             native_windows_gui::dispatch_thread_events();
             Ok(())
