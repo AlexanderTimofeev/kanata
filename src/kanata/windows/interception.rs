@@ -8,7 +8,7 @@ use crate::kanata::*;
 #[cfg(feature = "kmdf_driver")]
 use crate::oskbd::KbdIn;
 #[cfg(feature = "kmdf_driver")]
-use crate::oskbd::windows::kbdflt::kmdf_trace;
+use crate::oskbd::kmdf_trace;
 use crate::oskbd::KeyValue;
 
 #[cfg(all(feature = "interception_driver", not(feature = "kmdf_driver")))]
