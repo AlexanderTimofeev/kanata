@@ -613,17 +613,13 @@ impl KmdfSession {
             })
             .collect();
 
-        let started = std::time::Instant::now();
-        kmdf_trace(format_args!("INJECT_BEGIN session={} count={} events={events:?}", self.label, events.len()));
-        let result = self.ioctl_overlapped(
+        self.ioctl_overlapped(
             IOCTL_KANATA_INJECT_EVENTS,
             wire.as_ptr() as *const _,
             (size_of::<KanataWireEvent>() * wire.len()) as u32,
             ptr::null_mut(),
             0,
-        );
-        kmdf_trace(format_args!("INJECT_END session={} elapsed_us={} result={result:?}", self.label, started.elapsed().as_micros()));
-        result?;
+        )?;
 
         Ok(())
     }
