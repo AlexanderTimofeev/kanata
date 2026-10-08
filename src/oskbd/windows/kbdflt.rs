@@ -52,33 +52,6 @@ use kanata_parser::cfg::HWID_ARR_SZ;
 use kanata_parser::custom_action::*;
 use kanata_parser::keys::*;
 
-// Optional diagnostic trace, independent of normal log configuration.
-// Explicit opt-in: KANATA_KMDF_TRACE=1. Records key scan codes, so do not
-// enable while entering passwords or other sensitive information.
-static KMDF_TRACE: Lazy<Option<Mutex<std::fs::File>>> = Lazy::new(|| {
-    if std::env::var("KANATA_KMDF_TRACE").ok().as_deref() != Some("1") {
-        return None;
-    }
-    let path = std::env::current_exe().ok()?.with_file_name("kanata-kmdf-trace.log");
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok()?;
-    log::warn!("kanata-kbdflt: diagnostic trace enabled: {}", path.display());
-    Some(Mutex::new(file))
-});
-
-pub(crate) fn kmdf_trace(args: std::fmt::Arguments<'_>) {
-    use std::io::Write;
-    if let Some(file) = KMDF_TRACE.as_ref() {
-        let mut f = file.lock();
-        let _ = writeln!(
-            f,
-            "{:?} tid={:?} {}",
-            std::time::SystemTime::now(),
-            std::thread::current().id(),
-            args
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // IOCTL constants — mirror kanata_shared.h
 // ---------------------------------------------------------------------------
@@ -828,7 +801,7 @@ fn input_reader_thread(
         match session.read_events() {
             Ok(events) => {
                 for event in events {
-                    kmdf_trace(format_args!("READ session={} sc=0x{:04X} flags=0x{:04X}", session.label, event.make_code, event.flags));
+                    log::debug!("kmdf READ session={} sc=0x{:04X} flags=0x{:04X}", session.label, event.make_code, event.flags);
                     let sourced = SourcedInputEvent {
                         event,
                         session: session.clone(),
