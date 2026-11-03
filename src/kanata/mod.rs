@@ -66,6 +66,7 @@ use kanata_keyberon::action::ReleasableState;
 use kanata_keyberon::key_code::*;
 use kanata_keyberon::layout::{CustomEvent, Event, Layout, State};
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time;
@@ -173,6 +174,10 @@ pub struct Kanata {
     /// tick. This must only be updated once per tick and must not be modified outside of the one
     /// procedure that updates it.
     pub prev_keys: Vec<KeyCode>,
+    /// Virtual keys queued for release by release-all-vkeys, in reverse order so that the next
+    /// one is popped from the back. One is released per tick, matching the rate at which the
+    /// layout processes inputs, so that many virtual keys do not overflow its input queue.
+    pub vkeys_to_release: Vec<u16>,
     /// Used for printing layer info to the info log when changing layers.
     pub layer_info: Vec<LayerInfo>,
     /// Used to track when a layer change occurs.
@@ -191,6 +196,8 @@ pub struct Kanata {
     pub move_mouse_state_horizontal: Option<MoveMouseState>,
     /// A list of mouse speed modifiers in percentages by which mouse travel distance is scaled.
     pub move_mouse_speed_modifiers: Vec<u16>,
+    /// A list of mouse wheel speed modifiers in percentages by which scroll distance is scaled.
+    pub mousewheel_speed_modifiers: Vec<u16>,
     /// Gamepad config declared by `defgamepad`, kept for live reload. `None`
     /// without one: mapped `pad-*` input requires a declaration, even an
     /// empty one.
@@ -212,6 +219,9 @@ pub struct Kanata {
     gamepad_moving: bool,
     /// Whether a debounced controller threshold crossing is waiting to settle.
     gamepad_debounce_pending: bool,
+    /// Reusable allocation for accumulating edge triggers during `tick` calls,
+    /// for later processing.
+    pub(crate) gamepad_triggered_edges: Vec<kanata_parser::gamepad::PadEdge>,
     /// The user configuration for backtracking to find valid sequences. See
     /// <../../docs/sequence-adding-chords-ideas.md> for more info.
     pub sequence_backtrack_modcancel: bool,
@@ -333,6 +343,8 @@ pub struct Kanata {
     unmodded_mods: UnmodMods,
     /// Keys that should be unshifted. If non-empty, left+right shift keys should be cleared.
     unshifted_keys: Vec<KeyCode>,
+    /// Keys that are suppressed.
+    suppressed_keys: Vec<KeyCode>,
     /// Keep track of last pressed key for [`CustomAction::Repeat`].
     last_pressed_key: KeyCode,
     /// Names of fake keys mapped to their index in the fake keys row
@@ -341,6 +353,8 @@ pub struct Kanata {
     pub max_key_timing_check: u16,
     #[cfg(feature = "tcp_server")]
     tcp_server_address: Option<SocketAddrWrapper>,
+    #[cfg(feature = "tcp_server")]
+    danger_tcp_allow_keylogging: bool,
     #[cfg(all(target_os = "windows", feature = "gui"))]
     /// Various GUI-related options.
     pub gui_opts: CfgOptionsGui,
@@ -498,17 +512,20 @@ impl Kanata {
             layer_info: cfg.layer_info,
             cur_keys: Vec::new(),
             prev_keys: Vec::new(),
+            vkeys_to_release: Vec::new(),
             prev_layer: 0,
             scroll_state: None,
             hscroll_state: None,
             move_mouse_state_vertical: None,
             move_mouse_state_horizontal: None,
             move_mouse_speed_modifiers: Vec::new(),
+            mousewheel_speed_modifiers: Vec::new(),
             gamepad_config: cfg.gamepad,
             gamepad: None,
             gamepad_accumulator: Default::default(),
             gamepad_moving: false,
             gamepad_debounce_pending: false,
+            gamepad_triggered_edges: Vec::new(),
             sequence_backtrack_modcancel: cfg.options.sequence_backtrack_modcancel,
             sequence_always_on: cfg.options.sequence_always_on,
             sequence_input_mode: cfg.options.sequence_input_mode,
@@ -584,12 +601,15 @@ impl Kanata {
             unmodded_keys: vec![],
             unmodded_mods: UnmodMods::empty(),
             unshifted_keys: vec![],
+            suppressed_keys: vec![],
             last_pressed_key: KeyCode::No,
             virtual_keys: cfg.fake_keys,
             max_key_timing_check: cfg.max_key_timing_check,
             input_devices: cfg.input_devices,
             #[cfg(feature = "tcp_server")]
             tcp_server_address: args.tcp_server_address.clone(),
+            #[cfg(feature = "tcp_server")]
+            danger_tcp_allow_keylogging: cfg.options.tcp_opts.danger_tcp_allow_keylogging,
             #[cfg(all(target_os = "windows", feature = "gui"))]
             gui_opts: cfg.options.gui_opts,
             allow_hardware_repeat: cfg.options.allow_hardware_repeat,
@@ -660,17 +680,20 @@ impl Kanata {
             layer_info: cfg.layer_info,
             cur_keys: Vec::new(),
             prev_keys: Vec::new(),
+            vkeys_to_release: Vec::new(),
             prev_layer: 0,
             scroll_state: None,
             hscroll_state: None,
             move_mouse_state_vertical: None,
             move_mouse_state_horizontal: None,
             move_mouse_speed_modifiers: Vec::new(),
+            mousewheel_speed_modifiers: Vec::new(),
             gamepad_config: cfg.gamepad,
             gamepad: None,
             gamepad_accumulator: Default::default(),
             gamepad_moving: false,
             gamepad_debounce_pending: false,
+            gamepad_triggered_edges: Vec::new(),
             sequence_backtrack_modcancel: cfg.options.sequence_backtrack_modcancel,
             sequence_always_on: cfg.options.sequence_always_on,
             sequence_input_mode: cfg.options.sequence_input_mode,
@@ -746,12 +769,15 @@ impl Kanata {
             unmodded_keys: vec![],
             unmodded_mods: UnmodMods::empty(),
             unshifted_keys: vec![],
+            suppressed_keys: vec![],
             last_pressed_key: KeyCode::No,
             virtual_keys: cfg.fake_keys,
             max_key_timing_check: cfg.max_key_timing_check,
             input_devices: cfg.input_devices,
             #[cfg(feature = "tcp_server")]
             tcp_server_address: None,
+            #[cfg(feature = "tcp_server")]
+            danger_tcp_allow_keylogging: cfg.options.tcp_opts.danger_tcp_allow_keylogging,
             #[cfg(all(target_os = "windows", feature = "gui"))]
             gui_opts: cfg.options.gui_opts,
             allow_hardware_repeat: cfg.options.allow_hardware_repeat,
@@ -787,6 +813,11 @@ impl Kanata {
         Ok(Arc::new(Mutex::new(k)))
     }
 
+    #[cfg(feature = "tcp_server")]
+    pub fn allows_keylogging(&self) -> bool {
+        self.danger_tcp_allow_keylogging
+    }
+
     pub(crate) fn do_live_reload(&mut self, _tx: &Option<Sender<ServerMessage>>) -> Result<()> {
         let cfg = match cfg::new_from_file(&self.cfg_paths[self.cur_cfg_idx]) {
             Ok(c) => c,
@@ -820,6 +851,10 @@ impl Kanata {
         self.dynamic_macro_replay_behaviour = ReplayBehaviour {
             delay: cfg.options.dynamic_macro_replay_delay_behaviour,
         };
+        #[cfg(feature = "tcp_server")]
+        {
+            self.danger_tcp_allow_keylogging = cfg.options.tcp_opts.danger_tcp_allow_keylogging;
+        }
         self.max_key_timing_check = cfg.max_key_timing_check;
         // Note: input_devices is intentionally not updated on live reload.
         // The KbdIn device_hash_to_id map is built at startup and not rebuilt.
@@ -860,11 +895,10 @@ impl Kanata {
             self.gamepad_accumulator.reset();
             self.gamepad_moving = false;
             self.gamepad_debounce_pending = false;
-            let mut edges = Vec::new();
+            let edges = &mut self.gamepad_triggered_edges;
+            edges.clear();
             match (&mut self.gamepad, self.gamepad_config) {
-                (Some(gamepad), config) => {
-                    gamepad.reconfigure(config.unwrap_or_default(), &mut edges)
-                }
+                (Some(gamepad), config) => gamepad.reconfigure(config.unwrap_or_default(), edges),
                 // Adding controller input to a running instance needs the
                 // channel that only startup has, so it takes a restart.
                 (None, Some(_)) => log::warn!(
@@ -873,7 +907,7 @@ impl Kanata {
                 ),
                 (None, None) => {}
             }
-            self.apply_gamepad_edges(&edges)?;
+            self.apply_gamepad_edges()?;
         }
         #[cfg(any(target_os = "linux", target_os = "android"))]
         Kanata::set_repeat_rate(cfg.options.linux_opts.linux_x11_repeat_delay_rate)?;
@@ -1114,7 +1148,21 @@ impl Kanata {
         });
     }
 
+    fn tick_queued_vkey_releases(&mut self) {
+        if self.vkeys_to_release.is_empty() {
+            return;
+        }
+        release_next_queued_fake_key(
+            self.layout.bm(),
+            &mut self.vkeys_to_release,
+            &mut self.vkeys_pending_release,
+        );
+    }
+
     fn tick_states(&mut self, _tx: &Option<Sender<ServerMessage>>) -> Result<()> {
+        // Runs before handle_keystate_changes, which releases the first queued virtual key
+        // itself, so that only one release is forwarded per tick.
+        self.tick_queued_vkey_releases();
         self.live_reload_requested |= self.handle_keystate_changes(_tx)?;
         self.handle_scrolling()?;
         self.handle_move_mouse()?;
@@ -1171,6 +1219,8 @@ impl Kanata {
             [None, None] => {}
         }
         for (direction, distance) in accrued.scrolls().into_iter().flatten() {
+            let distance =
+                apply_mouse_distance_modifiers(distance, &self.mousewheel_speed_modifiers);
             self.kbd_out.scroll(direction, distance)?;
         }
         Ok(())
@@ -1186,13 +1236,15 @@ impl Kanata {
             self.gamepad_debounce_pending = false;
             return Ok(());
         };
-        let mut edges = Vec::new();
-        gamepad.tick(1, &mut edges);
+        let edges = &mut self.gamepad_triggered_edges;
+        edges.clear();
+        gamepad.tick(1, edges);
         self.gamepad_debounce_pending = gamepad.has_pending();
-        self.apply_gamepad_edges(&edges)
+        self.apply_gamepad_edges()
     }
 
     /// Feed edges a controller produced into the processing loop.
+    /// Reads edges from `self.gamepad_triggered_edges`.
     ///
     /// For the callers that already run *on* the processing thread: a live
     /// reload and a state clean. They hand the events straight to
@@ -1203,16 +1255,19 @@ impl Kanata {
     /// The controller thread cannot use this — it is a different thread — and
     /// sends `KeyEvent`s down the channel instead. Both paths pass through the
     /// same `defsrc` gate, and neither holds a lock across the delivery.
-    pub(crate) fn apply_gamepad_edges(
-        &mut self,
-        edges: &[kanata_parser::gamepad::PadEdge],
-    ) -> Result<()> {
-        let mut events = Vec::new();
-        crate::gamepad::gate_on_defsrc(edges, &mut events);
-        for event in events {
-            self.handle_input_event(&event)?;
+    pub(crate) fn apply_gamepad_edges(&mut self) -> Result<()> {
+        thread_local! {
+            static EVENT_BUFFER: RefCell<Vec<KeyEvent>> = const { RefCell::new(vec![]) };
         }
-        Ok(())
+        EVENT_BUFFER.with_borrow_mut(|events| {
+            events.clear();
+
+            crate::gamepad::gate_on_defsrc(&self.gamepad_triggered_edges, events);
+            for event in events.iter() {
+                self.handle_input_event(event)?;
+            }
+            Ok(())
+        })
     }
 
     /// Start controller input handling if the configuration maps a controller
@@ -1238,6 +1293,8 @@ impl Kanata {
                     self.scroll_state = None;
                 }
                 _ => {
+                    let distance =
+                        apply_mouse_distance_modifiers(distance, &self.mousewheel_speed_modifiers);
                     self.kbd_out.scroll(direction, distance)?;
                 }
             }
@@ -1249,6 +1306,8 @@ impl Kanata {
                     self.hscroll_state = None;
                 }
                 _ => {
+                    let distance =
+                        apply_mouse_distance_modifiers(distance, &self.mousewheel_speed_modifiers);
                     self.kbd_out.scroll(direction, distance)?;
                 }
             }
@@ -1414,32 +1473,42 @@ impl Kanata {
         let custom_event = layout.tick();
 
         #[cfg(feature = "tcp_server")]
-        if let Some(hold_info) = layout.tap_hold_tracker.take_hold_activated()
-            && hold_info.coord.0 == NORMAL_KEY_ROW
-            && let Some(tx) = _tx
-        {
-            let osc = OsCode::from(hold_info.coord.1);
-            let key = osc.to_string().to_lowercase();
-            log::debug!("HoldActivated: key={key} coord={:?}", hold_info.coord);
-            match tx.try_send(ServerMessage::HoldActivated { key }) {
-                Ok(_) => {}
-                Err(error) => {
-                    log::error!("could not send HoldActivated event: {}", error);
+        if self.danger_tcp_allow_keylogging {
+            let key_name = |key_pos| {
+                if key_pos < KEY_MAX {
+                    let osc = OsCode::from(key_pos);
+                    osc.to_string().to_lowercase()
+                } else {
+                    // The chordsv2 internals uses unnameable faked higher key positions for the
+                    // coordinates of activated actions within keyberon states.
+                    // Give them a custom name.
+                    format!("chordsv2:{}", key_pos - KEY_MAX)
+                }
+            };
+            if let Some(hold_info) = layout.tap_hold_tracker.take_hold_activated()
+                && hold_info.coord.0 == NORMAL_KEY_ROW
+                && let Some(tx) = _tx
+            {
+                let key = key_name(hold_info.coord.1);
+                log::warn!("HoldActivated: key={key} coord={:?}", hold_info.coord);
+                match tx.try_send(ServerMessage::HoldActivated { key }) {
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::error!("could not send HoldActivated event: {}", error);
+                    }
                 }
             }
-        }
-        #[cfg(feature = "tcp_server")]
-        if let Some(tap_info) = layout.tap_hold_tracker.take_tap_activated()
-            && tap_info.coord.0 == NORMAL_KEY_ROW
-            && let Some(tx) = _tx
-        {
-            let osc = OsCode::from(tap_info.coord.1);
-            let key = osc.to_string().to_lowercase();
-            log::debug!("TapActivated: key={key} coord={:?}", tap_info.coord);
-            match tx.try_send(ServerMessage::TapActivated { key }) {
-                Ok(_) => {}
-                Err(error) => {
-                    log::error!("could not send TapActivated event: {}", error);
+            if let Some(tap_info) = layout.tap_hold_tracker.take_tap_activated()
+                && tap_info.coord.0 == NORMAL_KEY_ROW
+                && let Some(tx) = _tx
+            {
+                let key = key_name(tap_info.coord.1);
+                log::warn!("TapActivated: key={key} coord={:?}", tap_info.coord);
+                match tx.try_send(ServerMessage::TapActivated { key }) {
+                    Ok(_) => {}
+                    Err(error) => {
+                        log::error!("could not send TapActivated event: {}", error);
+                    }
                 }
             }
         }
@@ -1465,6 +1534,9 @@ impl Kanata {
                 CustomAction::Unshifted { keys } => {
                     self.unshifted_keys.extend(keys.iter());
                 }
+                CustomAction::Suppressed { suppressed_keys } => {
+                    self.suppressed_keys.extend(suppressed_keys.iter());
+                }
                 CustomAction::SequenceNoerase(noerase_count) => {
                     if let Some(state) = self.sequence_state.get_active() {
                         log::debug!("adding noerase: {noerase_count}");
@@ -1479,6 +1551,10 @@ impl Kanata {
                 }
                 CustomAction::Unshifted { keys } => {
                     self.unshifted_keys.retain(|k| !keys.contains(k));
+                }
+                CustomAction::Suppressed { suppressed_keys } => {
+                    self.suppressed_keys
+                        .retain(|k| !suppressed_keys.contains(k));
                 }
                 CustomAction::ReverseReleaseOrder => {
                     reverse_release_order = true;
@@ -1507,6 +1583,9 @@ impl Kanata {
         if !self.unshifted_keys.is_empty() {
             cur_keys.retain(|k| !matches!(k, KeyCode::LShift | KeyCode::RShift));
             cur_keys.extend(self.unshifted_keys.iter());
+        }
+        if !self.suppressed_keys.is_empty() {
+            cur_keys.retain(|k| !self.suppressed_keys.contains(k))
         }
 
         self.overrides.override_keys(
@@ -1870,6 +1949,13 @@ impl Kanata {
                             self.move_mouse_speed_modifiers
                         );
                     }
+                    CustomAction::MouseWheelSpeed { speed } => {
+                        self.mousewheel_speed_modifiers.push(*speed);
+                        log::debug!(
+                            "mousewheel speed modifiers: {:?}",
+                            self.mousewheel_speed_modifiers
+                        );
+                    }
                     CustomAction::Cmd(_cmd) => {
                         #[cfg(feature = "cmd")]
                         cmds.push((
@@ -2077,10 +2163,22 @@ impl Kanata {
                     CustomAction::ClipboardSaveSwap(id1, id2) => {
                         clpb_save_swap(*id1, *id2, &mut self.saved_clipboard_content);
                     }
+                    CustomAction::FakeKeyReleaseAll => {
+                        log::debug!("releasing all virtual keys");
+                        queue_release_all_fake_keys(layout, &mut self.vkeys_to_release);
+                        // Release the first one now so that it comes before any press that
+                        // follows in the same action, e.g. in multi.
+                        release_next_queued_fake_key(
+                            layout,
+                            &mut self.vkeys_to_release,
+                            &mut self.vkeys_pending_release,
+                        );
+                    }
                     CustomAction::FakeKeyOnRelease { .. }
                     | CustomAction::DelayOnRelease(_)
                     | CustomAction::Unmodded { .. }
                     | CustomAction::Unshifted { .. }
+                    | CustomAction::Suppressed { .. }
                     // Note: ReverseReleaseOrder is already handled earlier on.
                     | CustomAction::ReverseReleaseOrder
                     | CustomAction::CancelMacroOnRelease => {}
@@ -2196,6 +2294,19 @@ impl Kanata {
                     log::debug!(
                         "movemousespeed modifiers: {:?}",
                         self.move_mouse_speed_modifiers
+                    );
+                }
+                CustomAction::MouseWheelSpeed { speed } => {
+                    if let Some(idx) = self
+                        .mousewheel_speed_modifiers
+                        .iter()
+                        .position(|s| *s == *speed)
+                    {
+                        self.mousewheel_speed_modifiers.remove(idx);
+                    }
+                    log::debug!(
+                        "mousewheel speed modifiers: {:?}",
+                        self.mousewheel_speed_modifiers
                     );
                 }
                 CustomAction::DelayOnRelease(delay) => {
@@ -2423,7 +2534,10 @@ impl Kanata {
                         let mut clients = clients.lock();
                         let mut stale_clients = vec![];
                         for (id, client) in &mut *clients {
-                            match client.write_all(&notification) {
+                            if !client.is_subscribed_to(&event) {
+                                continue;
+                            }
+                            match client.stream.write_all(&notification) {
                                 Ok(_) => {
                                     log::debug!("layer change notification sent");
                                 }
@@ -2828,6 +2942,7 @@ impl Kanata {
             && self.dynamic_macro_replay_state.is_none()
             && self.caps_word.is_none()
             && self.vkeys_pending_release.is_empty()
+            && self.vkeys_to_release.is_empty()
             && !layout.states.iter().any(|s| {
                 matches!(s, State::SeqCustomPending(_) | State::SeqCustomActive(_))
                     || (pressed_keys_means_not_idle && matches!(s, State::NormalKey { .. }))
@@ -3189,18 +3304,50 @@ pub fn handle_fakekey_action<'a, const C: usize, const R: usize, T>(
     };
 }
 
+/// Queue every virtual key that currently has an active state in the layout for release.
+/// Anything still queued from an earlier call is replaced.
+fn queue_release_all_fake_keys<'a, const C: usize, const R: usize, T>(
+    layout: &Layout<'a, C, R, T>,
+    vkeys_to_release: &mut Vec<u16>,
+) where
+    T: 'a + std::fmt::Debug + Copy,
+{
+    vkeys_to_release.clear();
+    vkeys_to_release.extend(
+        layout
+            .states
+            .iter()
+            .filter_map(|s| s.coord())
+            .filter(|&(x, _)| x == FAKE_KEY_ROW)
+            .map(|(_, y)| y),
+    );
+    // Reverse order, so that popping from the back releases the lowest index first.
+    vkeys_to_release.sort_unstable_by(|a, b| b.cmp(a));
+    vkeys_to_release.dedup();
+}
+
+/// Release the next queued virtual key that is still active. Releases at most one.
+fn release_next_queued_fake_key<'a, const C: usize, const R: usize, T>(
+    layout: &mut Layout<'a, C, R, T>,
+    vkeys_to_release: &mut Vec<u16>,
+    vkeys_pending_release: &mut HashMap<Coord, u16>,
+) where
+    T: 'a + std::fmt::Debug + Copy,
+{
+    while let Some(y) = vkeys_to_release.pop() {
+        if !states_has_coord(&layout.states, FAKE_KEY_ROW, y) {
+            continue;
+        }
+        // Forget a pending hold-for-duration release of this virtual key,
+        // so that a later hold-for-duration presses it again.
+        vkeys_pending_release.remove(&Coord { x: FAKE_KEY_ROW, y });
+        layout.event(Event::Release(FAKE_KEY_ROW, y));
+        return;
+    }
+}
+
 fn states_has_coord<T>(states: &[State<T>], x: u8, y: u16) -> bool {
-    states.iter().any(|s| match s {
-        State::NormalKey { coord, .. }
-        | State::LayerModifier { coord, .. }
-        | State::Custom { coord, .. }
-        | State::NoOpInput { coord }
-        | State::RepeatingSequence { coord, .. } => *coord == (x, y),
-        State::FakeKey { .. }
-        | State::SeqCustomPending(_)
-        | State::SeqCustomActive(_)
-        | State::Tombstone => false,
-    })
+    states.iter().any(|s| s.coord() == Some((x, y)))
 }
 
 #[cfg(all(

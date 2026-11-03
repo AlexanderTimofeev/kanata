@@ -110,9 +110,10 @@ fn apply_pad_analog(k: &mut Kanata, spec: &str) {
         handle.connect(SIM_PAD, Default::default());
         handle
     });
-    let mut edges = Vec::new();
-    gamepad.feed(SIM_PAD, input, &mut edges);
-    k.apply_gamepad_edges(&edges)
+    let edges = &mut k.gamepad_triggered_edges;
+    edges.clear();
+    gamepad.feed(SIM_PAD, input, edges);
+    k.apply_gamepad_edges()
         .expect("controller edges apply fine");
 }
 
@@ -140,9 +141,12 @@ mod override_tests;
 mod release_sim_tests;
 mod repeat_sim_tests;
 mod seq_sim_tests;
+mod suppress_keys_tests;
 mod switch_sim_tests;
 mod tap_dance_tests;
 mod tap_hold_tests;
+#[cfg(feature = "tcp_server")]
+mod tcp_server_tests;
 mod template_sim_tests;
 mod timing_tests;
 mod unicode_sim_tests;

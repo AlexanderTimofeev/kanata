@@ -559,6 +559,91 @@ fn parse_distance_rejects_out_of_range() {
 }
 
 #[test]
+fn parse_mousewheel_speed() {
+    parse_cfg("(defsrc a) (deflayer base (mousewheel-speed 50))")
+        .map_err(|e| eprintln!("{:?}", miette::Error::from(e)))
+        .expect("valid speed should parse");
+    for (action, msg) in [
+        (
+            "(mousewheel-speed)",
+            "mousewheel-speed expects one parameter, found 0",
+        ),
+        (
+            "(mousewheel-speed 50 50)",
+            "mousewheel-speed expects one parameter, found 2",
+        ),
+        ("(mousewheel-speed 0)", "speed scaling % must be 1-65535"),
+        ("(mousewheel-speed fast)", "speed scaling % must be 1-65535"),
+    ] {
+        let err = parse_cfg(&format!("(defsrc a) (deflayer base {action})"))
+            .expect_err("invalid mousewheel-speed should be rejected");
+        assert!(err.msg.contains(msg), "{action}: real e: {}", err.msg);
+    }
+}
+
+#[test]
+fn parse_setmouse_wrong_param_count_names_setmouse() {
+    for action in ["(setmouse 1)", "(setmouse 1 2 3)"] {
+        let err = parse_cfg(&format!("(defsrc a) (deflayer base {action})"))
+            .expect_err("setmouse with wrong parameter count should be rejected");
+        assert!(
+            err.msg.contains("setmouse expects two parameters"),
+            "{action}: real e: {}",
+            err.msg
+        );
+    }
+}
+
+#[test]
+fn parse_unmod_without_keys_has_clean_error_message() {
+    for action in ["(unmod)", "(unshift)"] {
+        let err = parse_cfg(&format!("(defsrc a) (deflayer base {action})"))
+            .expect_err("unmod without keys should be rejected");
+        assert!(
+            err.msg.contains(" expects at least one key name"),
+            "{action}: real e: {}",
+            err.msg
+        );
+        assert!(
+            !err.msg.contains("expects expects"),
+            "{action}: real e: {}",
+            err.msg
+        );
+    }
+}
+
+#[test]
+fn parse_tap_dance_with_empty_action_list_is_an_error() {
+    for action in ["tap-dance", "tap-dance-eager"] {
+        let err = parse_cfg(&format!("(defsrc a) (deflayer base ({action} 200 ()))"))
+            .expect_err("tap-dance without actions should be rejected");
+        assert!(
+            err.msg.contains("at least one action"),
+            "{action}: real e: {}",
+            err.msg
+        );
+    }
+}
+
+#[test]
+fn parse_fakekey_delay_wrong_param_count_is_an_error() {
+    for action in [
+        "(on-press-fakekey-delay)",
+        "(on-press-fakekey-delay 10 20)",
+        "(on-release-fakekey-delay)",
+        "(on-release-fakekey-delay 10 20)",
+    ] {
+        let err = parse_cfg(&format!("(defsrc a) (deflayer base {action})"))
+            .expect_err("fakekey delay with wrong parameter count should be rejected");
+        assert!(
+            err.msg.contains("expects a single number"),
+            "{action}: real e: {}",
+            err.msg
+        );
+    }
+}
+
+#[test]
 fn recursive_multi_is_flattened() {
     macro_rules! atom {
         ($e:expr) => {
@@ -1637,6 +1722,34 @@ fn parse_defcfg_linux_output_bus() {
 }
 
 #[test]
+fn parse_defcfg_danger_tcp_allow_keylogging() {
+    let default_source = r#"
+(defsrc a)
+(deflayer base a)
+"#;
+    assert!(
+        !parse_cfg(default_source)
+            .expect("parses")
+            .options
+            .tcp_opts
+            .danger_tcp_allow_keylogging
+    );
+
+    let enabled_source = r#"
+(defcfg danger-tcp-allow-keylogging yes)
+(defsrc a)
+(deflayer base a)
+"#;
+    assert!(
+        parse_cfg(enabled_source)
+            .expect("parses")
+            .options
+            .tcp_opts
+            .danger_tcp_allow_keylogging
+    );
+}
+
+#[test]
 fn parse_unmod() {
     let source = r#"
 (defsrc a b c d e)
@@ -2430,4 +2543,58 @@ fn parse_defcfg_wintercept_mouse_hwid_rejects_overlong() {
 (deflayer base a)
 ";
     parse_cfg(source).expect("short hwid should parse");
+}
+
+#[test]
+fn defchordsv2_include_without_file_name_is_an_error() {
+    let source = "
+(defcfg concurrent-tap-hold yes)
+(defsrc a b)
+(deflayer base a b)
+(defchordsv2
+  (include) () 100 all-released ()
+)
+";
+    let err = parse_cfg(source).expect_err("include without a file name must be rejected");
+    assert!(
+        err.msg.contains("include"),
+        "unexpected error message: {}",
+        err.msg
+    );
+}
+
+#[test]
+fn defchordsv2_include_with_list_file_name_is_an_error() {
+    let source = "
+(defcfg concurrent-tap-hold yes)
+(defsrc a b)
+(deflayer base a b)
+(defchordsv2
+  (include (a b)) () 100 all-released ()
+)
+";
+    let err = parse_cfg(source).expect_err("include with a list must be rejected");
+    assert!(
+        err.msg.contains("include"),
+        "unexpected error message: {}",
+        err.msg
+    );
+}
+
+#[test]
+fn defchordsv2_include_of_missing_file_is_an_error() {
+    let source = "
+(defcfg concurrent-tap-hold yes)
+(defsrc a b)
+(deflayer base a b)
+(defchordsv2
+  (include this-chord-file-does-not-exist.txt) () 100 all-released ()
+)
+";
+    let err = parse_cfg(source).expect_err("include of a missing file must be rejected");
+    assert!(
+        err.msg.contains("this-chord-file-does-not-exist.txt"),
+        "unexpected error message: {}",
+        err.msg
+    );
 }

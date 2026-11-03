@@ -346,6 +346,13 @@ If you need help, please feel welcome to ask in the GitHub discussions.
   ;; the key name is always supported, however.
   ;;
   ;; mouse-movement-key mvmt
+
+  ;; With TCP enabled, clients can subscribe to events that contain your
+  ;; key outputs. To ensure that users understand what they are opting
+  ;; into, this is disabled by default. This can be enabled via the
+  ;; following configuration:
+  ;;
+  ;; danger-tcp-allow-keylogging yes
 )
 
 ;; deflocalkeys-* enables you to define and use key names that match your locale
@@ -733,6 +740,12 @@ If you need help, please feel welcome to ask in the GitHub discussions.
   um1 (unmod 1)
   ;; dead keys é (as opposed to using AltGr) that outputs É when shifted
   dké (macro (unmod ') e)
+  ;; You can suppress other arbitrary keys with suppress-keys
+  ;; This example is equivalent to unshift
+  uns (multi (suppress-keys lsft rsft) a)
+
+  ;; d:$key and u:$key allow individual press/release of a key
+  m24 (macro a b d:f24 c d e u:f24 f g)
 
   ;; unshift is like unmod but only releases shifts
   ;; In ISO German QWERTZ, force unshifted symbols even if shift is held
@@ -1164,6 +1177,10 @@ If you need help, please feel welcome to ask in the GitHub discussions.
   ;; given time as you would like, but be warned that some values, such as 33
   ;; may not have correct pixel distance representations.
   fms (movemouse-speed 200)
+
+  ;; mousewheel-speed is the same as movemouse-speed but scales the scroll
+  ;; distance of the mwheel actions instead.
+  sms (mousewheel-speed 50)
 )
 
 (defalias
@@ -1219,6 +1236,9 @@ If you need help, please feel welcome to ask in the GitHub discussions.
 
   isfvk (on-idle 1000 tap-vkey vksft)
   pisfvk (on-physical-idle 1000 tap-vkey vksft)
+
+  ;; Release every virtual key that is currently pressed or toggled on
+  ravk release-all-vkeys
 )
 
 ;; Press and release fake keys.

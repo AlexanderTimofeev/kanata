@@ -212,6 +212,19 @@ mod motion {
     }
 
     #[test]
+    fn mousewheel_speed_scales_controller_scrolling() {
+        let cfg = "\
+    (defcfg process-unmapped-keys no)
+    (defgamepad (stick left (scroll (speed 4000) (curve linear))))
+    (defsrc a)
+    (deflayer base (mousewheel-speed 50))
+    ";
+        let result = simulate(cfg.to_string(), "d:a t:1 pad:left:0.0,1.0 t:2".to_string());
+        assert!(result.contains("scroll:Up,2"), "{result}");
+        assert!(!result.contains("scroll:Up,4"), "{result}");
+    }
+
+    #[test]
     fn a_trigger_can_drive_the_wheel_by_how_hard_it_is_squeezed() {
         // A trigger is one number, so it is told which way to push. Squeezing
         // harder scrolls faster, which a digital control cannot express.
@@ -293,12 +306,13 @@ mod from_the_tick {
     /// Feed one reading through the engine, as the backend would, and deliver
     /// whatever edges come back.
     fn feed(k: &mut Kanata, input: PadInput) {
-        let mut edges = Vec::new();
+        let edges = &mut k.gamepad_triggered_edges;
+        edges.clear();
         k.gamepad
             .as_ref()
             .expect("a controller")
-            .feed(SIM_PAD, input, &mut edges);
-        k.apply_gamepad_edges(&edges).expect("edges apply");
+            .feed(SIM_PAD, input, edges);
+        k.apply_gamepad_edges().expect("edges apply");
     }
 
     fn south(pressed: bool) -> PadInput {
@@ -423,13 +437,11 @@ mod from_the_tick {
             "the press should have landed"
         );
 
-        let mut edges = Vec::new();
-        k.gamepad
-            .as_mut()
-            .expect("a controller")
-            .release_all(&mut edges);
+        let edges = &mut k.gamepad_triggered_edges;
+        edges.clear();
+        k.gamepad.as_mut().expect("a controller").release_all(edges);
         assert!(!edges.is_empty(), "there was something to release");
-        k.apply_gamepad_edges(&edges).expect("edges apply");
+        k.apply_gamepad_edges().expect("edges apply");
         k.tick_ms(5, &None).expect("ticks fine");
 
         let out = k.kbd_out.outputs.events.join("\n");
@@ -575,12 +587,10 @@ mod from_the_tick {
         feed(&mut k, south(true));
         feed(&mut k, stick(Side::Right, 1.0, 0.0));
 
-        let mut edges = Vec::new();
-        k.gamepad
-            .as_mut()
-            .expect("a controller")
-            .release_all(&mut edges);
-        k.apply_gamepad_edges(&edges).expect("edges apply");
+        let edges = &mut k.gamepad_triggered_edges;
+        edges.clear();
+        k.gamepad.as_mut().expect("a controller").release_all(edges);
+        k.apply_gamepad_edges().expect("edges apply");
 
         assert!(
             k.gamepad.as_ref().expect("a controller").drives_motion(),

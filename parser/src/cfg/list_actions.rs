@@ -78,6 +78,7 @@ pub const MWHEEL_ACCEL_UP: &str = "mwheel-accel-up";
 pub const MWHEEL_ACCEL_DOWN: &str = "mwheel-accel-down";
 pub const MWHEEL_ACCEL_LEFT: &str = "mwheel-accel-left";
 pub const MWHEEL_ACCEL_RIGHT: &str = "mwheel-accel-right";
+pub const MOUSEWHEEL_SPEED: &str = "mousewheel-speed";
 pub const MOVEMOUSE_UP: &str = "movemouse-up";
 pub const MOVEMOUSE_DOWN: &str = "movemouse-down";
 pub const MOVEMOUSE_LEFT: &str = "movemouse-left";
@@ -121,6 +122,7 @@ pub const SEQUENCE_NOERASE: &str = "sequence-noerase";
 pub const UNMOD: &str = "unmod";
 pub const UNSHIFT: &str = "unshift";
 pub const UNSHIFT_A: &str = "un⇧";
+pub const SUPPRESS_KEYS: &str = "suppress-keys";
 pub const LIVE_RELOAD_NUM: &str = "lrld-num";
 pub const LIVE_RELOAD_FILE: &str = "lrld-file";
 pub const ON_PRESS: &str = "on-press";
@@ -212,6 +214,7 @@ pub fn is_list_action(ac: &str) -> bool {
         MWHEEL_ACCEL_DOWN,
         MWHEEL_ACCEL_LEFT,
         MWHEEL_ACCEL_RIGHT,
+        MOUSEWHEEL_SPEED,
         MOVEMOUSE_UP,
         MOVEMOUSE_UP_A,
         MOVEMOUSE_DOWN,
@@ -255,6 +258,7 @@ pub fn is_list_action(ac: &str) -> bool {
         UNMOD,
         UNSHIFT,
         UNSHIFT_A,
+        SUPPRESS_KEYS,
         LIVE_RELOAD_NUM,
         LIVE_RELOAD_FILE,
         ON_PRESS,

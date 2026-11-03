@@ -1348,7 +1348,7 @@ as part of `multi`.
 
 **Description**
 
-Within `multi` you can use include `reverse-release-order`
+Within `multi` you can use `reverse-release-order`
 to do what the action states: reverse the typical release order from
 if you have multiple keys in multi.
 
@@ -1729,6 +1729,21 @@ WARNING: Due to the nature of pixels being whole numbers, some values such as
 (defalias
   fst (movemouse-speed 200)
   slw (movemouse-speed 50)
+)
+----
+
+The action `mousewheel-speed` does the same for the mouse wheel. While the key is
+pressed, the scroll distance of `mwheel` and `mwheel-accel` actions, as well as
+gamepad scrolling, is scaled by the given percentage. This also applies to
+scrolling that is already in progress, and the acceleration state of
+`mwheel-accel` is unaffected.
+
+.Example:
+[source]
+----
+(defalias
+  wfst (mousewheel-speed 200)
+  wslw (mousewheel-speed 50)
 )
 ----
 
@@ -2454,13 +2469,23 @@ This means that with `+macro+` you can have some letters capitalized and others
 not. This is not possible with `+multi+`.
 
 The `+macro+` action accepts one or more keys, some actions, chords, and delays
-(unit: ms).  It also accepts a list prefixed with <<output-chordscombos,output chord>>
+(unit: ms). It also accepts a list prefixed with <<output-chordscombos,output chord>>
 modifiers where the list is subject to the aforementioned restrictions.
 
 IMPORTANT: The number keys `0-9` will be parsed as millisecond delays
 whereas in other contexts they would be parsed as key names.
 To use the numbered keys they must be aliased
 or otherwise use the key names `Digit0-Digit9`.
+
+Keys may also be prefixed with `+d:+` to mean: "down only" (a.k.a. "press only")
+or `+u:+` to mean "up only" (a.k.a. "release only").
+
+IMPORTANT: A key that is pressed down by a macro will remain pressed
+even if the macro ends with no release, e.g. `(macro d:$key)`.
+This key can be released by another macro action that releases it,
+e.g. `(macro u:$key)` or with the action `(release-key $key)`.
+Notably pressing and releasing the same key on your keyboard
+will not release the pressed macro key.
 
 Up to 4 macros can be active at the same time.
 
@@ -2499,6 +2524,10 @@ needs the delay of `5` to work correctly.
   ;; alt-tab(x3) and alt-shift-tab(x3) with macro
   tfd (macro A-(tab 200 tab 200 tab))
   tbk (macro A-S-(tab 200 tab 200 tab))
+
+  ;; Maybe you use F24 as some "special" modifier by another external program.
+  ;; You can wrap some characters within the same macro with F24 and others not.
+  m24 (macro a b d:f24 c d e u:f24 f g)
 )
 ----
 
@@ -2841,6 +2870,42 @@ rather than all modifiers.
 (defalias
 	;; only unshift the alt keys
 	unalt-a (unmod (lalt ralt) a)
+)
+----
+
+[[suppress-keys]]
+=== suppress-keys
+
+**Reference**
+
+The `suppress-keys` action applies temporary suppression of the configured keys.
+When suppression is activated, release events will be sent for any key
+that is listed and that is currently pressed.
+When the suppress action is released,
+press events will be sent for any suppressed keys are still pressed.
+
+.Syntax:
+[source]
+----
+(suppress-keys $key1 $key2 ... $keyN)
+----
+
+**Description**
+
+The `suppress-keys' action triggers temporary release of the configured keys.
+The concept is similar to <<unshift>> and <<unmod>>.
+Unlike those actions, `suppress-keys` does not contain separate parameters for
+suppressed keys vs. added keys;
+the configuration is only for suppressed keys.
+If on a single action you wish to suppress a key while also activating different keys,
+use `suppress-keys` within `multi`.
+
+.Example:
+[source]
+----
+(defalias
+  ;; This example is equivalent to unshift
+  uns (multi (suppress-keys lsft rsft) a)
 )
 ----
 
@@ -5159,6 +5224,24 @@ Monitoring permission in System Settings > Privacy & Security.
 )
 ----
 
+[[danger-tcp-allow-keylogging]]
+=== danger-tcp-allow-keylogging
+
+With TCP enabled,
+clients can subscribe to events that contain your key outputs.
+To ensure that users understand what they are opting into,
+this is disabled by default.
+Sending key events over TCP can be enabled
+by setting this configuration to: yes.
+
+.Example:
+[source]
+----
+(defcfg
+  danger-tcp-allow-keylogging yes
+)
+----
+
 [[linux-only-linux-dev]]
 === Linux only: linux-dev
 
@@ -5527,34 +5610,6 @@ and any <<deflayermap,`deflayermap`>> `$input` position.
 )
 ----
 
-[[windows-only-windows-sync-keystates]]
-=== Windows only: windows-sync-keystates
-
-By default Kanata on Windows without Interception
-has behaviour to check against the Windows operating system
-and try to synchronize known keys where they differ
-between the OS and Kanata.
-This is because of limitations in the Windows keyboard APIs
-where Kanata is not guaranteed to see all events.
-However, likewise due to limitations in the APIs,
-even this sync mechanism is not perfect.
-If the sync behaviour is causing issues, set it to `none`.
-The default is `clear-kanata-states`.
-
-Options:
-
-* `none`
-* `clear-kanata-states`
-* `clear-kanata-and-os-states`
-
-.Example:
-[source]
-----
-(defcfg
-  windows-sync-keystates none
-)
-----
-
 For more context, see: https://github.com/jtroo/kanata/issues/55.
 
 NOTE: Even with these workarounds, putting `+lctl+` and `+ralt+` in your defsrc may not
@@ -5568,6 +5623,43 @@ PowerToys Keyboard Manager or AutoHotKey (AHK),
 you can still experience issues.
 PowerToys has no workaround while with AHK
 you may be able to script your own workaround.
+
+[[windows-only-windows-sync-keystates]]
+=== Windows only: windows-sync-keystates
+
+By default Kanata on Windows without Interception
+has behaviour to check against the Windows operating system
+and try to synchronize known keys where they differ
+between the OS and Kanata.
+This is because of limitations in the Windows keyboard APIs
+where Kanata is not guaranteed to see all events.
+However, likewise due to limitations in the APIs,
+even this sync mechanism is not perfect.
+If the sync behaviour is causing issues, set it to `none`.
+
+You can suspect that issues are happening
+if you see the below message in the Kanata logs:
+
+[source]
+----
+Unexpected keycode is pressed in kanata but not in Windows. Clearing kanata states: SOME_KEY
+----
+
+Options:
+
+* `none`
+* `clear-kanata-states`
+* `clear-kanata-and-os-states`
+
+The default is `clear-kanata-states`.
+
+.Example:
+[source]
+----
+(defcfg
+  windows-sync-keystates none
+)
+----
 
 === Windows only: windows-interception-mouse-hwid[[windows-only-windows-interception-mouse-hwid]]
 
@@ -5841,6 +5933,75 @@ https://github.com/jtroo/kanata/blob/main/tcp_protocol/src/lib.rs[TCP protocol c
 
 You may also be interested in the
 https://github.com/jtroo/kanata/blob/main/example_tcp_client/src/main.rs[example client].
+
+==== Command-line client: `kanata msg`
+
+`kanata msg` sends one message to a running kanata and exits.
+It waits until kanata has processed the message
+and exits with a non-zero code if anything failed,
+e.g. an unknown layer or virtual key name,
+which makes it suitable for scripts.
+
+[source]
+----
+kanata msg -p 7070 change-layer nav
+kanata msg -p 7070 act-on-fake-key email-sig tap
+kanata msg -p 7070 reload --skip-wait
+kanata msg -p 7070 --json current-layer
+kanata msg -p 7070 event-stream | jq -c 'select(.LayerChange)'
+----
+
+[cols="1,2"]
+|===
+| Subcommand | Description
+
+| `list-layers`
+| Print the names of all layers, one per line.
+
+| `current-layer`
+| Print the name of the active layer.
+
+| `current-layer-info`
+| Print the configuration text of the active layer.
+
+| `list-fake-keys`
+| Print the names of all virtual keys, one per line.
+
+| `hello`
+| Print the kanata version, protocol version and capabilities.
+
+| `change-layer <NAME>`
+| Change the base layer. Fails if the layer does not exist and lists the available layers.
+
+| `act-on-fake-key <NAME> [ACTION]`
+| Act on a virtual key. `ACTION` is `press`, `release`, `tap` or `toggle` (default `tap`). Fails if the key does not exist.
+
+| `set-mouse <X> <Y>`
+| Move the mouse cursor to an absolute position. Failures are not reported because kanata does not reply to it.
+
+| `reload [--skip-wait]`
+| Reload the current configuration file.
+
+| `reload-next [--skip-wait]`
+| Reload the next configuration file.
+
+| `reload-prev [--skip-wait]`
+| Reload the previous configuration file.
+
+| `reload-num <INDEX> [--skip-wait]`
+| Reload the configuration file at a zero-based index of the `--cfg` list.
+
+| `reload-file <PATH> [--skip-wait]`
+| Reload a configuration file. Relative paths are resolved by the kanata process.
+
+| `event-stream`
+| Print every message from kanata as a JSON line until the connection closes, then exit with a non-zero code.
+|===
+
+Replies are printed as plain text; pass `--json` to print the raw JSON lines instead.
+A reload succeeds only if it finishes successfully within `--timeout-ms` (default 5000).
+With `--skip-wait`, it succeeds as soon as kanata accepts the request.
+Run `kanata msg --help` for all options.
 
 ==== TCP Protocol Overview
 
@@ -6157,6 +6318,11 @@ Release the virtual key. If it is not already pressed, this does nothing.
 * `toggle-virtualkey  | toggle-vkey`:
 Press the virtual key if it is not already pressed, otherwise release it.
 
+To release every virtual key that is currently pressed,
+for example after toggling several of them,
+use the standalone action `release-all-virtualkeys` or its short form `release-all-vkeys`.
+Virtual keys that are not pressed are left alone.
+
 A virtual key can be defined in a `defvirtualkeys` configuration entry.
 Configuring this entry is similar to `+defalias+`,
 but you cannot make use of aliases inside to shorten an action.
@@ -6203,10 +6369,11 @@ to only start based on having all keyboard keys be released.
 
   isf (on-idle 1000 tap-vkey sft)
   hfd (hold-for-duration 1000 met)
+  rav release-all-vkeys
 )
 
 (deflayer use-virtual-keys
-  @psf @rsf @tal @mac a s d f @isf @hfd
+  @psf @rsf @tal @mac a s d f @isf @hfd @rav
 )
 ----
 

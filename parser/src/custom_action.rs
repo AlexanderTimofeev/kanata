@@ -29,6 +29,8 @@ pub enum CustomAction {
     FakeKeyOnIdle(FakeKeyOnIdle),
     FakeKeyOnPhysicalIdle(FakeKeyOnIdle),
     FakeKeyHoldForDuration(FakeKeyHoldForDuration),
+    /// Release every virtual key that is currently pressed.
+    FakeKeyReleaseAll,
     Delay(u16),
     DelayOnRelease(u16),
     MWheel {
@@ -53,6 +55,9 @@ pub enum CustomAction {
         max_distance: u16,
     },
     MoveMouseSpeed {
+        speed: u16,
+    },
+    MouseWheelSpeed {
         speed: u16,
     },
     SequenceCancel,
@@ -89,6 +94,13 @@ pub enum CustomAction {
     },
     Unshifted {
         keys: &'static [KeyCode],
+    },
+    /// Keys that will be temporarily suppressed from Kanata output.
+    /// If a suppressed key currently pressed, a release event should be sent for that key.
+    /// When the Suppressed action is released, if a suppressed key is still pressed,
+    /// a press event should be sent for that key.
+    Suppressed {
+        suppressed_keys: &'static [KeyCode],
     },
     ReverseReleaseOrder,
     ClipboardSet(&'static str),
