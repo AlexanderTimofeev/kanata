@@ -998,6 +998,12 @@ impl Kanata {
 
     /// Update keyberon layout state for press/release, handle repeat separately
     pub fn handle_input_event(&mut self, event: &KeyEvent) -> Result<()> {
+        #[cfg(all(target_os = "windows", feature = "kmdf_driver"))]
+        if crate::input_diagnostics::enabled() {
+            crate::input_diagnostics::record("ENGINE_PROCESS", format_args!(
+                "key={:?} action={:?}", event.code, event.value
+            ), false);
+        }
         log::debug!("process recv ev {event:?}");
         if event.value == KeyValue::Press {
             self.layout

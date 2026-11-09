@@ -67,6 +67,16 @@ kanata.kbd in the current working directory and
     #[arg(short, long)]
     pub list: bool,
 
+    /// Experimental KMDF diagnostics; needs no driver update. Default: off.
+    #[cfg(all(target_os = "windows", feature = "kmdf_driver"))]
+    #[arg(long = "input-diag", default_value = "off", value_parser = ["off", "anomalies", "full"])]
+    pub input_diag: String,
+
+    /// Directory for experimental KMDF logs (default: LOCALAPPDATA\\Kanata\\diagnostics).
+    #[cfg(all(target_os = "windows", feature = "kmdf_driver"))]
+    #[arg(long = "input-diag-dir")]
+    pub input_diag_dir: Option<PathBuf>,
+
     /// Disable logging, except for errors. Takes precedent over debug and trace.
     #[arg(short, long)]
     pub quiet: bool,

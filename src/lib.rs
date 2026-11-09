@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 pub mod gamepad;
+#[cfg(all(target_os = "windows", feature = "kmdf_driver"))]
+pub mod input_diagnostics;
 #[cfg(all(target_os = "windows", feature = "gui"))]
 pub mod gui;
 pub mod kanata;

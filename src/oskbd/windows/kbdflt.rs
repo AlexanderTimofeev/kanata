@@ -14,7 +14,7 @@
 //! Interception driver. It reuses the same configuration parameters (e.g. HWID filtering)
 //! to ensure a seamless transition for users.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::mem::size_of;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -22,7 +22,8 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use crate::input_diagnostics as diag;
 
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
@@ -476,6 +477,7 @@ pub(crate) struct KmdfSession {
     label: String,
     hwid: [u8; HWID_ARR_SZ],
     inject_lock: Mutex<()>,
+    output_held: Mutex<HashSet<u16>>,
 }
 
 impl KmdfSession {
@@ -488,6 +490,7 @@ impl KmdfSession {
             label,
             hwid,
             inject_lock: Mutex::new(()),
+            output_held: Mutex::new(HashSet::new()),
         })
     }
 
@@ -586,14 +589,41 @@ impl KmdfSession {
             })
             .collect();
 
-        self.ioctl_overlapped(
+        if diag::enabled() {
+            for e in events {
+                diag::record("OUTPUT_ATTEMPT", format_args!(
+                    "device={} code={} flags={}", self.label, e.make_code, e.flags
+                ), false);
+            }
+        }
+        let result = self.ioctl_overlapped(
             IOCTL_KANATA_INJECT_EVENTS,
             wire.as_ptr() as *const _,
             (size_of::<KanataWireEvent>() * wire.len()) as u32,
             ptr::null_mut(),
             0,
-        )?;
-
+        );
+        if diag::enabled() {
+            let mut held = self.output_held.lock();
+            for e in events {
+                let code = e.make_code | ((e.flags & 0x6) << 7);
+                let down = e.flags & 1 == 0;
+                let duplicate = if result.is_ok() {
+                    if down { !held.insert(code) } else { held.remove(&code); false }
+                } else { false };
+                if duplicate {
+                    diag::record("OUTPUT_DUP_DOWN", format_args!(
+                        "device={} code={} flags={} (repeat or duplicate)", self.label, code, e.flags
+                    ), true);
+                }
+                diag::record("OUTPUT_KMDF", format_args!(
+                    "device={} code={} flags={} result={}",
+                    self.label, e.make_code, e.flags,
+                    if result.is_ok() { "ok" } else { "error" }
+                ), result.is_err());
+            }
+        }
+        result?;
         Ok(())
     }
 }
@@ -605,6 +635,8 @@ impl KmdfSession {
 pub(crate) struct SourcedInputEvent {
     pub event: InputEvent,
     pub session: Arc<KmdfSession>,
+    pub seq: u64,
+    pub received_at: Instant,
 }
 
 pub struct KbdIn {
@@ -660,13 +692,25 @@ impl KbdIn {
 
     /// Blocking read; returns one event at a time from any attached keyboard stack.
     pub(crate) fn read_sourced(&mut self) -> anyhow::Result<SourcedInputEvent> {
-        if let Some(event) = self.pending.pop_front() {
-            return Ok(event);
+        let sourced = if let Some(event) = self.pending.pop_front() {
+            event
+        } else {
+            self.rx.recv().map_err(|e| anyhow::anyhow!(
+                "kanata-kbdflt: all input reader threads stopped: {e}"
+            ))?
+        };
+        if diag::enabled() {
+            let lag = sourced.received_at.elapsed();
+            if lag > Duration::from_millis(25) {
+                diag::record("QUEUE_LAG", format_args!(
+                    "seq={} device={} lag_us={}", sourced.seq, sourced.session.label, lag.as_micros()
+                ), true);
+            }
+            diag::record("QUEUE_POP", format_args!(
+                "seq={} device={} lag_us={}", sourced.seq, sourced.session.label, lag.as_micros()
+            ), false);
         }
-
-        self.rx
-            .recv()
-            .map_err(|e| anyhow::anyhow!("kanata-kbdflt: all input reader threads stopped: {e}"))
+        Ok(sourced)
     }
 
     pub fn read(&mut self) -> anyhow::Result<InputEvent> {
@@ -797,14 +841,44 @@ fn input_reader_thread(
         hwid_bytes_to_lossy_string(session.hwid())
     );
 
+    let mut held: HashMap<u16, Instant> = HashMap::new();
+    let mut last_release: HashMap<u16, Instant> = HashMap::new();
     loop {
         match session.read_events() {
             Ok(events) => {
                 for event in events {
+                    let received_at = Instant::now();
+                    let seq = diag::next_seq();
+                    if diag::enabled() {
+                        let code = event.make_code | ((event.flags & 0x6) << 7);
+                        let is_up = event.flags & 1 != 0;
+                        let anomaly = if is_up {
+                            held.remove(&code);
+                            last_release.insert(code, received_at);
+                            false
+                        } else {
+                            let duplicate = held.insert(code, received_at).is_some();
+                            let fast = last_release.get(&code).is_some_and(|last| received_at.duration_since(*last) < Duration::from_millis(15));
+                            if duplicate || fast {
+                                diag::record(if duplicate { "DUP_DOWN" } else { "FAST_REPRESS" },
+                                    format_args!("seq={} device={} code={} flags={}", seq, session.label, code, event.flags), true);
+                            }
+                            duplicate || fast
+                        };
+                        diag::record("DRIVER_READ", format_args!(
+                            "seq={} device={} code={} flags={} up={} suspect={}",
+                            seq, session.label, code, event.flags, is_up, anomaly
+                        ), false);
+                    }
                     let sourced = SourcedInputEvent {
                         event,
                         session: session.clone(),
+                        seq,
+                        received_at,
                     };
+                    if diag::enabled() {
+                        diag::record("QUEUE_PUSH", format_args!("seq={} device={}", seq, session.label), false);
+                    }
                     if event_tx.send(sourced).is_err() {
                         log::info!(
                             "kanata-kbdflt: input reader exiting for {}; receiver closed",
@@ -822,6 +896,7 @@ fn input_reader_thread(
                     "kanata-kbdflt: read error on {} ({e}); reader stopped, manager will rescan",
                     session.label
                 );
+                diag::record("READ_ERROR", format_args!("device={} error={e}", session.label), true);
                 let _ = exit_tx.send(ReaderExit::Stopped {
                     label: session.label.clone(),
                 });
@@ -889,12 +964,26 @@ impl KbdOut {
 
     /// Note: write_code currently bypasses the KMDF driver and uses SendInput (legacy).
     pub fn write_code(&mut self, code: u32, value: KeyValue) -> Result<(), io::Error> {
-        super::write_code(code as u16, value)
+        let result = super::write_code(code as u16, value);
+        if diag::enabled() {
+            diag::record("OUTPUT_SENDINPUT", format_args!(
+                "kind=code code={} action={:?} result={}", code, value,
+                if result.is_ok() { "ok" } else { "error" }
+            ), result.is_err());
+        }
+        result
     }
 
     /// Note: write_code_raw currently bypasses the KMDF driver and uses SendInput (legacy).
     pub fn write_code_raw(&mut self, code: u16, value: KeyValue) -> Result<(), io::Error> {
-        super::write_code_raw(code, value)
+        let result = super::write_code_raw(code, value);
+        if diag::enabled() {
+            diag::record("OUTPUT_SENDINPUT", format_args!(
+                "kind=raw code={} action={:?} result={}", code, value,
+                if result.is_ok() { "ok" } else { "error" }
+            ), result.is_err());
+        }
+        result
     }
 
     pub fn press_key(&mut self, key: OsCode) -> Result<(), io::Error> {
@@ -909,6 +998,9 @@ impl KbdOut {
     pub fn send_unicode(&mut self, c: char) -> Result<(), io::Error> {
         super::send_uc(c, false);
         super::send_uc(c, true);
+        if diag::enabled() {
+            diag::record("OUTPUT_SENDINPUT", "kind=unicode (value redacted) result=unverified", false);
+        }
         Ok(())
     }
 

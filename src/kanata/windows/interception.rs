@@ -38,6 +38,11 @@ impl Kanata {
                 .read_sourced()
                 .map_err(|e| anyhow!("failed read: {e}"))?;
             let in_event = sourced.event;
+            if crate::input_diagnostics::enabled() {
+                crate::input_diagnostics::record("KANATA_RECEIVE", format_args!(
+                    "seq={} code={} flags={}", sourced.seq, in_event.make_code, in_event.flags
+                ), false);
+            }
 
             // Prefer injecting through the same raw PDO session that produced the event.
             kanata
@@ -51,6 +56,9 @@ impl Kanata {
                     if !e.is_fake_shift() {
                         log::warn!("unknown keyboard event from driver, passing through: {e:?}");
                     }
+                    crate::input_diagnostics::record("UNRECOGNIZED", format_args!(
+                        "seq={} code={} flags={}", sourced.seq, in_event.make_code, in_event.flags
+                    ), false);
                     sourced.session.inject_events(&[in_event])?;
                     continue;
                 }
@@ -59,6 +67,9 @@ impl Kanata {
             check_for_exit(&key_event);
 
             if !MAPPED_KEYS.lock().contains(&key_event.code) {
+                crate::input_diagnostics::record("PASS_THROUGH", format_args!(
+                    "seq={} key={:?} action={:?}", sourced.seq, key_event.code, key_event.value
+                ), false);
                 // This guarantees pass-through uses the exact session that captured the key.
                 sourced.session.inject_events(&[in_event])?;
                 continue;
@@ -80,10 +91,21 @@ impl Kanata {
             }
 
             if key_event.value == KeyValue::Repeat && !allow_hardware_repeat {
+                crate::input_diagnostics::record("REPEAT_DROPPED", format_args!(
+                    "seq={} key={:?}", sourced.seq, key_event.code
+                ), false);
                 continue;
             }
 
-            tx.try_send(key_event)?;
+            crate::input_diagnostics::record("ENGINE_QUEUE", format_args!(
+                "seq={} key={:?} action={:?}", sourced.seq, key_event.code, key_event.value
+            ), false);
+            if let Err(e) = tx.try_send(key_event) {
+                crate::input_diagnostics::record("ENGINE_QUEUE_ERR", format_args!(
+                    "seq={} error={e}", sourced.seq
+                ), true);
+                return Err(e.into());
+            }
         }
     }
 

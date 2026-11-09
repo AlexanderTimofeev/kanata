@@ -65,6 +65,16 @@ mod cli {
         .expect("logger can init");
 
         log::info!("kanata v{} starting", env!("CARGO_PKG_VERSION"));
+        #[cfg(all(target_os = "windows", feature = "kmdf_driver"))]
+        {
+            let mode: kanata_state_machine::input_diagnostics::Mode = args.input_diag.parse()
+                .map_err(|e: String| anyhow::anyhow!("{e}"))?;
+            match kanata_state_machine::input_diagnostics::init(mode, args.input_diag_dir.clone()) {
+                Ok(Some(path)) => log::info!("KMDF diagnostics enabled in {}", path.display()),
+                Ok(None) => {}
+                Err(e) => log::warn!("KMDF diagnostic logging disabled: {e}"),
+            }
+        }
         #[cfg(all(
             not(feature = "interception_driver"),
             not(feature = "kmdf_driver"),

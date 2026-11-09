@@ -109,8 +109,20 @@ fn cli_init() -> Result<ValidatedArgs> {
             .expect("logger can init");
     }
     log::info!("kanata v{} starting", env!("CARGO_PKG_VERSION"));
-    #[cfg(all(not(feature = "interception_driver"), target_os = "windows"))]
+    #[cfg(feature = "kmdf_driver")]
+    {
+        let mode: kanata_state_machine::input_diagnostics::Mode = args.input_diag.parse()
+            .map_err(|e: String| anyhow!("{e}"))?;
+        match kanata_state_machine::input_diagnostics::init(mode, args.input_diag_dir.clone()) {
+            Ok(Some(path)) => log::info!("KMDF diagnostics enabled in {}", path.display()),
+            Ok(None) => {}
+            Err(e) => log::error!("KMDF diagnostic logging disabled (check --input-diag-dir write permissions): {e}"),
+        }
+    }
+    #[cfg(all(not(feature = "interception_driver"), not(feature = "kmdf_driver"), target_os = "windows"))]
     log::info!("using LLHOOK+SendInput for keyboard IO");
+    #[cfg(feature = "kmdf_driver")]
+    log::info!("using the kanata-kbdflt KMDF driver for keyboard IO");
     #[cfg(all(feature = "interception_driver", target_os = "windows"))]
     log::info!("using the Interception driver for keyboard IO");
 
